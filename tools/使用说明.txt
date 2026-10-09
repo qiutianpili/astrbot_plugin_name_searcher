@@ -1,9 +1,12 @@
-NameSearcher 本地识别工具 v1.7.0
+NameSearcher 本地识别工具 v1.7.2
 
 1. 安装 Python 3.10 或更高版本（安装时勾选 Add python.exe to PATH）。
 2. 在本文件夹打开终端，运行：
        pip install -r requirements-local.txt
-3. 识别：把要识别的文件夹拖到“本地识别.bat”上；或运行
+3. 识别（图形界面，推荐）：双击“本地识别GUI.bat”，选文件夹，点“识别并打包”。
+   界面里有进度条、停止按钮、查看状态和“打开识别包位置”；缺依赖时会提示一键安装。
+   也可以把文件夹拖到“本地识别GUI.bat”上直接带入。
+   命令行方式：把要识别的文件夹拖到“本地识别.bat”上；或运行
        python name_searcher_local.py run D:\要识别的文件夹
    可以随时 Ctrl+C 中断，重跑同一命令会跳过已经识别完的文件。
 4. 完成后在 ns_local_work 文件夹里得到 bundle-时间.zip。

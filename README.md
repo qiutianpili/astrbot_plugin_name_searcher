@@ -90,7 +90,7 @@ PATCH /config
 服务器配置低（例如 1 核 2GB 还跑着 NapCat）时，大批量文件不要直接让服务器识别。改为：
 
 1. 在自己的电脑上准备 Python 3.10+，下载 `NameSearcher-local` 工具包并安装依赖：`pip install -r requirements-local.txt`
-2. 运行 `python name_searcher_local.py run D:\要识别的文件夹`（Windows 也可以把文件夹拖到 `本地识别.bat` 上）。
+2. 双击 `本地识别GUI.bat` 打开图形界面，选文件夹点“识别并打包”（有进度条、停止、状态查看，缺依赖可一键安装）；或命令行运行 `python name_searcher_local.py run D:\要识别的文件夹`（也可以把文件夹拖到 `本地识别.bat` 上）。
    - 用的是和插件完全相同的识别代码（RapidOCR、PDF/Office/表格解析、压缩包展开）。
    - 可以随时 Ctrl+C 中断；重跑同一命令会跳过已识别的文件。
 3. 结束后生成 `bundle-时间.zip`。打开插件页，点“导入识别包”选择它。

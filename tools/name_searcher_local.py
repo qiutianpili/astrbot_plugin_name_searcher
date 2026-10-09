@@ -73,18 +73,22 @@ def _iter_files(folder: Path):
             yield path
 
 
-async def _scan(folder: Path, work: Path, args: argparse.Namespace) -> int:
+async def _scan(folder: Path, work: Path, args: argparse.Namespace, log=print, progress=None, should_stop=None) -> int:
+    """识别 folder 里的文件。progress(index, total, status) 每个文件后调用；should_stop() 为真时在文件之间停下，返回 130。"""
     plugin = _plugin(work, args)
     files = list(_iter_files(folder))
     if not files:
-        print(f"{folder} 里没有文件")
+        log(f"{folder} 里没有文件")
         return 1
     run_id = datetime.now().strftime("%Y%m%d%H%M%S")
     event = ns.PanelUploadEvent()
     started = time.time()
     failed = 0
-    print(f"共 {len(files)} 个文件，工作目录 {work}")
+    log(f"共 {len(files)} 个文件，工作目录 {work}")
     for index, path in enumerate(files, 1):
+        if should_stop and should_stop():
+            log(f"已停止：完成 {index - 1}/{len(files)}。再次开始会跳过已完成的文件。")
+            return 130
         relative = path.relative_to(folder).as_posix()
         source = {
             "sender_id": "local-tool",
@@ -111,7 +115,9 @@ async def _scan(folder: Path, work: Path, args: argparse.Namespace) -> int:
             raise
         except Exception as exc:  # 一个文件出错不影响其他文件
             failed += 1
-            print(f"[{index}/{len(files)}] ✗ {relative}：{exc}")
+            log(f"[{index}/{len(files)}] ✗ {relative}：{exc}")
+            if progress:
+                progress(index, len(files), "failed")
             continue
         record = records[0] if records else {}
         status = ns._public_record(record).get("extraction_status") if record else "未处理"
@@ -120,12 +126,14 @@ async def _scan(folder: Path, work: Path, args: argparse.Namespace) -> int:
         if status in {"failed", "unavailable"}:
             failed += 1
         extra = f"，含 {len(records) - 1} 个压缩包成员" if len(records) > 1 else ""
-        print(f"[{index}/{len(files)}] {label} {relative}（{time.time() - t0:.1f}s{extra}）")
-    print(f"完成：{len(files)} 个文件，{failed} 个失败，用时 {time.time() - started:.0f}s")
+        log(f"[{index}/{len(files)}] {label} {relative}（{time.time() - t0:.1f}s{extra}）")
+        if progress:
+            progress(index, len(files), str(status))
+    log(f"完成：{len(files)} 个文件，{failed} 个失败，用时 {time.time() - started:.0f}s")
     return 0
 
 
-def _pack(work: Path, out: Path | None, label: str = "") -> Path:
+def _pack(work: Path, out: Path | None, label: str = "", log=print) -> Path:
     store = ns.ArtifactStore(work / "store")
     records = [item for item in store.list() if item.get("download_status") == "ok" and item.get("path")]
     if not records:
@@ -153,17 +161,22 @@ def _pack(work: Path, out: Path | None, label: str = "") -> Path:
         }
         bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, default=ns._json_default))
     size = out.stat().st_size / 1024 / 1024
-    print(f"已打包 {len(manifest_records)} 个文件 → {out}（{size:.1f} MB）")
-    print("下一步：打开 AstrBot 插件页，点“导入识别包”选择这个文件。")
+    log(f"已打包 {len(manifest_records)} 个文件 → {out}（{size:.1f} MB）")
+    log("下一步：打开 AstrBot 插件页，点“导入识别包”选择这个文件。")
     return out
 
 
-def _status(work: Path) -> None:
+def _status_counts(work: Path) -> dict[str, int]:
     store = ns.ArtifactStore(work / "store")
     counts: dict[str, int] = {}
     for item in store.list():
         key = str(item.get("extraction_status") or item.get("download_status"))
         counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _status(work: Path) -> None:
+    counts = _status_counts(work)
     print(json.dumps({"工作目录": str(work), "文件数": sum(counts.values()), "状态": counts}, ensure_ascii=False, indent=2))
 
 

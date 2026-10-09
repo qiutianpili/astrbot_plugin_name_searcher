@@ -1,7 +1,7 @@
 name: astrbot_plugin_name_searcher
 display_name: 姓名文件查找器
 desc: 捕获聊天附件和压缩包内容，支持本地批量上传、多视觉模型审核、姓名查找和实时管理面板。
-version: 1.7.1
+version: 1.7.2
 author: qiutianpili
 repo: https://github.com/qiutianpili/astrbot_plugin_name_searcher
 license: MIT

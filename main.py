@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.7.1"
+PLUGIN_VERSION = "1.7.2"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
