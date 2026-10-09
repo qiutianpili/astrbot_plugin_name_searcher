@@ -136,12 +136,33 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.7.1"
 PLUGIN_ROOT = Path(__file__).resolve().parent
+LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
+
+
+def _plugin_data_root() -> Path:
+    """Persistent data folder that survives AstrBot plugin updates.
+
+    AstrBot deletes ``data/plugins/<plugin>`` before unpacking an update, so
+    runtime files live in ``data/plugin_data/<plugin>`` instead.  Outside an
+    AstrBot tree (tests, the local tool) the plugin folder's ``data`` is used.
+    """
+
+    if PLUGIN_ROOT.parent.name == "plugins":
+        return PLUGIN_ROOT.parent.parent / "plugin_data" / PLUGIN_ID
+    return PLUGIN_ROOT / "data"
+
+
+def _resolve_data_path(raw: str) -> Path:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+    return _plugin_data_root() / path
 PLUGIN_PAGE_ROOT = PLUGIN_ROOT / "pages" / "name-searcher"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "storage_dir": "data/name_searcher/files",
+    "storage_dir": "files",
     "people_file": "",
     "ocr_lang": "chi_sim+eng",
     "max_file_size_mb": 25,
@@ -2380,9 +2401,7 @@ class PeopleIndex:
         raw_path = str(self.config.get("people_file") or "").strip()
         if not raw_path:
             return
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = PLUGIN_ROOT / path
+        path = _resolve_data_path(raw_path)
         self._loaded_from = str(path)
         try:
             if path.suffix.lower() == ".json":
@@ -3588,9 +3607,10 @@ class NameSearcherPlugin(Star):
         self.config: dict[str, Any] = dict(DEFAULT_CONFIG)
         if isinstance(config, Mapping):
             self.config.update(config)
-        storage = Path(str(self.config.get("storage_dir") or DEFAULT_CONFIG["storage_dir"])).expanduser()
-        if not storage.is_absolute():
-            storage = PLUGIN_ROOT / storage
+        raw_storage = str(self.config.get("storage_dir") or DEFAULT_CONFIG["storage_dir"]).strip()
+        if raw_storage.replace("\\", "/") in LEGACY_STORAGE_DIRS:
+            raw_storage = DEFAULT_CONFIG["storage_dir"]
+        storage = _resolve_data_path(raw_storage)
         self.store = ArtifactStore(storage)
         if self.config.get("cleanup_on_start") or self.config.get("clear_downloaded_files"):
             self.store.clear()

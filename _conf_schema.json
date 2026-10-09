@@ -2,13 +2,13 @@
   "storage_dir": {
     "description": "下载文件目录",
     "type": "string",
-    "hint": "相对路径以插件目录为基准；绝对路径也可用。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
-    "default": "data/name_searcher/files"
+    "hint": "相对路径以 AstrBot 的 data/plugin_data/astrbot_plugin_name_searcher 为基准（插件更新不会删除）；绝对路径也可用。旧默认值 data/name_searcher/files 会自动改用新位置。出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "default": "files"
   },
   "people_file": {
     "description": "人员库文件",
     "type": "string",
-    "hint": "支持 JSON、CSV、TSV 或 XLSX，建议包含姓名、班级、专业等列；留空时只搜索已捕获文件。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "hint": "支持 JSON、CSV、TSV 或 XLSX，建议包含姓名、班级、专业等列；相对路径同样以 data/plugin_data/astrbot_plugin_name_searcher 为基准；留空时只搜索已捕获文件。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
     "default": ""
   },
   "ocr_lang": {

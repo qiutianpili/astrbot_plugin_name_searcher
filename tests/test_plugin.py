@@ -830,6 +830,15 @@ class NameSearcherPluginTests(unittest.TestCase):
         not_bundle.write_bytes(b"not a zip")
         self.assertFalse(plugin.import_from_inbox()["bundles"][0]["ok"])
 
+    def test_storage_lives_outside_plugin_folder(self):
+        from unittest import mock
+        plugin_root = self.temp_path / "data" / "plugins" / main.PLUGIN_ID
+        plugin_root.mkdir(parents=True)
+        with mock.patch.object(main, "PLUGIN_ROOT", plugin_root):
+            for value in ("data/name_searcher/files", "files", ""):
+                plugin = main.NameSearcherPlugin(object(), {"storage_dir": value, "people_file": "", "restrict_chat_scope": False})
+                self.assertEqual(plugin.store.root, (self.temp_path / "data" / "plugin_data" / main.PLUGIN_ID / "files").resolve())
+
     def test_upload_interrupted_twice_is_skipped(self):
         plugin = make_plugin(self.temp_path)
         record = plugin.store.add_bytes("x.txt", b"hello", kind="document", mime="text/plain", source={"upload_source": "plugin-page"})

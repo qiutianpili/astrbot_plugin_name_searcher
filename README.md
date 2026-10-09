@@ -69,7 +69,7 @@ PATCH /config
 
 ## 配置重点
 
-`storage_dir` 默认为 `data/name_searcher/files`。`ocr_preprocess` 控制图片增强，`ocr_psm_modes` 控制 Tesseract 版面尝试，`pdf_ocr_max_pages` 限制扫描 PDF 的 OCR 页数。`review_threshold` 控制低置信度图片审核提醒，`request_review_on_low_confidence` 可关闭主动提醒；`cleanup_on_start` 每次启动清空文件，`clear_downloaded_files` 保存后只执行一次清理并自动复位。
+`storage_dir` 默认为 `files`，位于 AstrBot 的 `data/plugin_data/astrbot_plugin_name_searcher/` 下（1.7.1 起；AstrBot 更新插件时会删除插件目录，数据放在外面才不会丢）。旧默认值 `data/name_searcher/files` 自动改用新位置，旧目录里的数据不会自动搬迁。`people_file` 的相对路径也以该目录为基准。`ocr_preprocess` 控制图片增强，`ocr_psm_modes` 控制 Tesseract 版面尝试，`pdf_ocr_max_pages` 限制扫描 PDF 的 OCR 页数。`review_threshold` 控制低置信度图片审核提醒，`request_review_on_low_confidence` 可关闭主动提醒；`cleanup_on_start` 每次启动清空文件，`clear_downloaded_files` 保存后只执行一次清理并自动复位。
 
 `restrict_chat_scope` 默认开启，请先填写 `allowed_group_ids` 和 `allowed_private_ids`。多个 ID 可用逗号、分号、空格或换行分隔；`*` 表示允许该类型的所有聊天。开启限制后，空的允许列表会禁用对应聊天类型。群聊会优先读取适配器提供的群号、频道 ID 或群会话 ID；私聊使用发送者用户 ID。视觉模型配置中的 `vision_provider` 和 LLM 审核配置中的 `llm_review_provider` 均应填写 AstrBot 聊天模型提供商 ID；留空时按当前会话选择，面板会提供可选提供商和模型。
 
