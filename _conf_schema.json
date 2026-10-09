@@ -1,0 +1,295 @@
+{
+  "storage_dir": {
+    "description": "下载文件目录",
+    "type": "string",
+    "hint": "相对路径以插件目录为基准；绝对路径也可用。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "default": "data/name_searcher/files"
+  },
+  "people_file": {
+    "description": "人员库文件",
+    "type": "string",
+    "hint": "支持 JSON、CSV、TSV 或 XLSX，建议包含姓名、班级、专业等列；留空时只搜索已捕获文件。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "default": ""
+  },
+  "ocr_lang": {
+    "description": "OCR 语言",
+    "type": "string",
+    "hint": "传给 Tesseract 的语言包，例如 chi_sim+eng。",
+    "default": "chi_sim+eng"
+  },
+  "ocr_preprocess": {
+    "description": "增强图片后再识别",
+    "type": "bool",
+    "hint": "自动校正方向、放大小图、增强对比度、锐化并尝试二值化，通常能改善截图和拍照名单的识别效果。",
+    "default": true
+  },
+  "ocr_psm_modes": {
+    "description": "OCR 版面模式",
+    "type": "string",
+    "hint": "Tesseract PSM，多值用逗号分隔。推荐 6,11：同时尝试规整文本块和稀疏文字。",
+    "default": "6,11"
+  },
+  "ocr_upscale_min_side": {
+    "description": "OCR 放大目标短边",
+    "type": "int",
+    "hint": "短边低于此像素数时自动放大，最大限制为 2400 万像素。",
+    "default": 1600
+  },
+  "pdf_ocr_max_pages": {
+    "description": "扫描 PDF 最大 OCR 页数",
+    "type": "int",
+    "hint": "PDF 没有可提取文本时，最多转成图片识别的页数。",
+    "default": 8
+  },
+  "vision_enabled": {
+    "description": "启用模型视觉识别",
+    "type": "bool",
+    "hint": "开启后，每份成功下载的文件都会生成视觉审阅页，并提交给 AstrBot 当前或指定的视觉模型。",
+    "default": true
+  },
+  "vision_provider": {
+    "description": "视觉模型提供商 ID",
+    "type": "string",
+    "hint": "留空使用当前会话提供商；填写 AstrBot 聊天模型提供商 ID 可固定到指定模型服务。",
+    "default": "",
+    "invisible": true
+  },
+  "vision_model": {
+    "description": "视觉模型名称",
+    "type": "string",
+    "hint": "留空使用提供商默认模型，例如填写 qwen-vl-plus 或 gpt-4o。",
+    "default": "",
+    "invisible": true
+  },
+  "vision_model_targets": {
+    "description": "视觉模型",
+    "type": "string",
+    "hint": "每行一个 provider::model，可在插件页中直接多选；留空使用当前会话的模型。",
+    "default": ""
+  },
+  "vision_review_max_pages": {
+    "description": "每份文件最大视觉审阅页数",
+    "type": "int",
+    "hint": "PDF、DOCX 和其他文件最多提交的审阅页或内嵌图片数量，范围 1 到 12。",
+    "default": 4
+  },
+  "vision_consensus_enabled": {
+    "description": "启用多模型共识审核",
+    "type": "bool",
+    "hint": "多个视觉结果可用时，再由首个所选模型综合本地解析和全部模型结果，输出最终可检索文本。",
+    "default": true
+  },
+  "vision_consensus_prompt": {
+    "description": "多模型共识提示词",
+    "type": "string",
+    "hint": "用于综合本地解析和多个视觉模型结果。",
+    "default": "请综合本地解析和多个视觉模型结果，逐行核对姓名、编号、班级、专业及表格列关系。不得概括、删行或合并不同人员；保留完整可检索原文和表格结构，只输出最终校正文本。"
+  },
+  "vision_prompt": {
+    "description": "视觉识别提示词",
+    "type": "string",
+    "hint": "用于要求模型提取姓名、班级、专业等文字并保留表格结构。",
+    "default": "请完整识别这份文件页面中的正文、表格和图片文字，逐行保留姓名、编号、班级、专业及所有单元格关系。不得概括、删行或合并不同人员，只输出可检索的完整原文。"
+  },
+  "vision_timeout_seconds": {
+    "description": "视觉模型超时（秒）",
+    "type": "int",
+    "hint": "单张图片调用视觉模型的最长等待时间。",
+    "default": 60
+  },
+  "llm_review_enabled": {
+    "description": "启用 LLM 文件审核",
+    "type": "bool",
+    "hint": "开启后，文件识别结果会提交给所选 AstrBot 模型提供商审核并修正；关闭时仅使用本地或视觉模型识别。",
+    "default": false
+  },
+  "llm_review_provider": {
+    "description": "LLM 审核提供商 ID",
+    "type": "string",
+    "hint": "填写 AstrBot 模型提供商 ID；留空使用当前会话提供商。",
+    "default": ""
+  },
+  "llm_review_model": {
+    "description": "LLM 审核模型名称",
+    "type": "string",
+    "hint": "留空使用提供商默认模型。",
+    "default": ""
+  },
+  "llm_review_prompt": {
+    "description": "LLM 审核提示词",
+    "type": "string",
+    "hint": "可使用 {name} 和 {text} 占位符；模型应输出可检索的修正文本。",
+    "default": "请审核下面的文件识别结果。判断是否包含可检索的人名及班级、专业等信息；如有明显错误，请给出修正后的简洁文本。只输出审核结论和修正文本。\n\n文件名：{name}\n识别结果：{text}"
+  },
+  "llm_review_timeout_seconds": {
+    "description": "LLM 审核超时（秒）",
+    "type": "int",
+    "hint": "单个文件审核的最长等待时间。",
+    "default": 60
+  },
+  "capture_progress_notify": {
+    "description": "捕获时发送进度",
+    "type": "bool",
+    "hint": "批量捕获时按阶段发送百分比和已捕获文件名；也可使用 /捕获进度 查询。",
+    "default": true
+  },
+  "notify_encoding_issues": {
+    "description": "通告乱码或转码文件",
+    "type": "bool",
+    "hint": "开启后，检测到非 UTF-8 中文编码或修复乱码时，向文件发送者汇总通告具体文件名和源编码。关闭只停止通告，自动转码仍会执行。",
+    "default": true
+  },
+  "capture_window_enabled": {
+    "description": "启用定时捕获窗口",
+    "type": "bool",
+    "hint": "开启后，插件先收集时间窗口内收到的附件，再作为一个批次统一下载、识别和审核。",
+    "default": true,
+    "invisible": true
+  },
+  "capture_interval_seconds": {
+    "description": "捕获窗口时长（秒）",
+    "type": "int",
+    "hint": "从窗口内第一份附件到批次开始处理的等待时间，建议 30 秒；填 0 则收到附件立即逐条处理。",
+    "default": 30
+  },
+  "archive_extraction_enabled": {
+    "description": "捕获压缩包内文件",
+    "type": "bool",
+    "hint": "自动展开 ZIP、7Z、RAR、TAR、GZ、BZ2、XZ 等压缩包，将内部图片和文件送入同一识别与查找流程。",
+    "default": true
+  },
+  "archive_max_depth": {
+    "description": "压缩包最大嵌套层级",
+    "type": "int",
+    "hint": "允许递归展开嵌套压缩包的层级，建议保持 3 或更低。",
+    "default": 3
+  },
+  "archive_max_members": {
+    "description": "单个压缩包最大成员数",
+    "type": "int",
+    "hint": "超过数量的成员会跳过，用于限制异常压缩包资源占用。",
+    "default": 300
+  },
+  "archive_max_total_size_mb": {
+    "description": "压缩包最大解压总量（MB）",
+    "type": "int",
+    "hint": "压缩包所有成员的累计解压大小上限，用于防止压缩炸弹。",
+    "default": 200
+  },
+  "panel_mount_path": {
+    "description": "文件面板挂载路径",
+    "type": "string",
+    "hint": "默认挂载到 AstrBot Web 服务的 /api/name-searcher；修改后需要重载插件。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "default": "/api/name-searcher"
+  },
+  "panel_public_url": {
+    "description": "文件面板外部访问地址",
+    "type": "string",
+    "hint": "可填写完整反向代理地址，供 /文件面板 命令返回；留空时返回挂载路径。 出于安全考虑，此项只能在 AstrBot 插件配置中修改，插件页无法更改。",
+    "default": ""
+  },
+  "panel_access_token": {
+    "description": "旧版面板访问令牌",
+    "type": "string",
+    "hint": "仅用于旧版直连面板（/api/name-searcher）。留空则旧版接口全部拒绝访问，AstrBot 插件页不受影响。设置后访问地址需带 ?token=令牌，或请求头 Authorization: Bearer 令牌。请使用足够长的随机字符串。",
+    "default": "",
+    "secret": true
+  },
+  "max_file_size_mb": {
+    "description": "单文件大小上限（MB）",
+    "type": "int",
+    "hint": "超过此大小的附件不会下载，并会进入待审核状态。",
+    "default": 25
+  },
+  "review_threshold": {
+    "description": "低置信度阈值",
+    "type": "float",
+    "hint": "图片 OCR 置信度低于此值时提醒发起人审核，取值范围 0 到 1。不再影响姓名匹配。",
+    "default": 0.55
+  },
+  "name_match_threshold": {
+    "description": "姓名近似匹配阈值",
+    "type": "float",
+    "hint": "人员库中长度相同的姓名相似度达到此值才算近似匹配，且仅在没有完全一致的姓名时显示。取值 0.6 到 1，默认 0.85；中文三字姓名错一个字（如 王小明/王小红）不会再命中。",
+    "default": 0.85
+  },
+  "request_review_on_low_confidence": {
+    "description": "低置信度时请求审核",
+    "type": "bool",
+    "hint": "无法下载、无法识别或图片模糊时，主动通知查找发起人。",
+    "default": true
+  },
+  "restrict_chat_scope": {
+    "description": "仅在指定聊天中启用",
+    "type": "bool",
+    "hint": "开启后，插件只会在下方允许的群聊或私聊中捕获文件并响应命令。允许列表为空时对应类型全部禁用。",
+    "default": true
+  },
+  "allowed_group_ids": {
+    "description": "允许的群聊 ID",
+    "type": "string",
+    "hint": "填写群号、频道 ID 或群会话 ID；多个 ID 用逗号、分号、空格或换行分隔。填写 * 允许所有群聊。",
+    "default": ""
+  },
+  "allowed_private_ids": {
+    "description": "允许的私聊用户 ID",
+    "type": "string",
+    "hint": "填写允许使用插件的私聊用户 ID；多个 ID 用逗号、分号、空格或换行分隔。填写 * 允许所有私聊。",
+    "default": ""
+  },
+  "admin_only_capture": {
+    "description": "仅捕获管理员发送的文件",
+    "type": "bool",
+    "hint": "开启后，只有下方管理员 ID 列表中的用户发送附件时才会捕获；不影响插件命令。管理员列表为空时不会捕获任何文件。",
+    "default": false
+  },
+  "admin_ids": {
+    "description": "管理员 ID",
+    "type": "string",
+    "hint": "填写允许触发文件捕获的发送者用户 ID；多个 ID 用逗号、分号、空格或换行分隔。",
+    "default": ""
+  },
+  "merged_forward_results": {
+    "description": "查找结果使用合并转发",
+    "type": "bool",
+    "hint": "开启后，/查找 的摘要和所有匹配结果会按聊天记录节点合并转发；适配器不支持该消息组件时自动回退为普通文本。",
+    "default": true
+  },
+  "allow_panel_delete": {
+    "description": "允许面板删除文件",
+    "type": "bool",
+    "hint": "关闭后，管理面板中的批量删除和清理接口将被拒绝。",
+    "default": true
+  },
+  "cleanup_on_start": {
+    "description": "启动时清理已下载文件",
+    "type": "bool",
+    "hint": "每次加载插件时删除全部已捕获文件及索引。",
+    "default": false
+  },
+  "clear_downloaded_files": {
+    "description": "一键清理已下载文件",
+    "type": "bool",
+    "hint": "打开并保存配置后执行一次清理；执行后插件会自动将此项复位为关闭。",
+    "default": false,
+    "invisible": true
+  },
+  "download_timeout_seconds": {
+    "description": "下载超时（秒）",
+    "type": "int",
+    "hint": "远程附件下载的最长等待时间。",
+    "default": 20
+  },
+  "min_free_memory_mb": {
+    "description": "内存保护（MB）",
+    "type": "int",
+    "default": 200,
+    "hint": "可用内存低于此值时，识别在两个文件之间暂停等待，最多 10 分钟；0 关闭。"
+  },
+  "import_max_bundle_mb": {
+    "description": "识别包大小上限（MB）",
+    "type": "int",
+    "default": 2048,
+    "hint": "插件页“导入识别包”允许的最大识别包。识别包由本地识别工具 name_searcher_local.py 生成。"
+  }
+}

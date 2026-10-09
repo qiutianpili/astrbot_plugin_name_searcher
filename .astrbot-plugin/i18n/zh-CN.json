@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "name-searcher": {
+      "title": "文件管理与预览",
+      "description": "查看、预览、搜索和删除已捕获的聊天文件。"
+    }
+  }
+}

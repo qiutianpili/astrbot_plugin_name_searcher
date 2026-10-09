@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Name Searcher | 文件资料库</title>
+  <style>
+    /* Hark pro — Hark 设计语言（与 Hark Books 同源的 tokens） */
+    :root {
+      --sans: "GT Standard", "Geist", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      --r-xs: 8px; --r-s: 12px; --r-m: 16px; --r-l: 24px; --r-pill: 100px;
+      --ease-out: cubic-bezier(0.23, 1, 0.32, 1); --dur: 160ms;
+      --orange: #ff4d00; --orange-soft: #ff4d0026; --green: #00a665;
+      --hero: #161f39; --hero-text: #f5f5f7; --hero-muted: #f5f5f7cc;
+      color-scheme: light;
+      --text-primary: #1d1d1f; --text-secondary: #636366; --text-tertiary: #1d1d1f4d;
+      --fill-primary: #1d1d1f; --fill-on: #f5f5f7; --fill-tertiary: #e8e8ea; --fill-card: #ffffff;
+      --red: #da2f35; --red-soft: #da2f3514;
+      --stroke: #1d1d1f24; --stroke-2: #1d1d1f12; --wash: #1d1d1f0d;
+      --shadow: 0 8px 40px #1d1d1f1f; --soft: 0 1px 2px #1d1d1f0f, 0 6px 24px #1d1d1f0f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --text-primary: #f5f5f7; --text-secondary: #a1a1a6; --text-tertiary: #f5f5f74d;
+        --fill-primary: #f5f5f7; --fill-on: #1d1d1f; --fill-tertiary: #2a2a2d; --fill-card: #242427;
+        --red: #f1555b; --red-soft: #f1555b1f;
+        --stroke: #f5f5f724; --stroke-2: #f5f5f712; --wash: #f5f5f70d;
+        --shadow: 0 8px 40px #0000004d; --soft: 0 1px 2px #00000033, 0 6px 24px #00000026;
+      }
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --text-primary: #f5f5f7; --text-secondary: #a1a1a6; --text-tertiary: #f5f5f74d;
+      --fill-primary: #f5f5f7; --fill-on: #1d1d1f; --fill-tertiary: #2a2a2d; --fill-card: #242427;
+      --red: #f1555b; --red-soft: #f1555b1f;
+      --stroke: #f5f5f724; --stroke-2: #f5f5f712; --wash: #f5f5f70d;
+      --shadow: 0 8px 40px #0000004d; --soft: 0 1px 2px #00000033, 0 6px 24px #00000026;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--fill-on); color: var(--text-primary); font: 400 15px/1.3 var(--sans); -webkit-font-smoothing: antialiased; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    h1, h2, p { margin: 0; }
+    :focus-visible { outline: 2px solid var(--fill-primary); outline-offset: 2px; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--stroke); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+    .app-shell { max-width: 1280px; margin: 0 auto; padding: 24px 28px 48px; }
+
+    /* hero */
+    .topbar { position: relative; overflow: hidden; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 28px 30px; margin-bottom: 16px; border-radius: var(--r-l); background: var(--hero); color: var(--hero-text); box-shadow: var(--shadow); }
+    .topbar::before { content: ""; position: absolute; width: 420px; height: 420px; right: -120px; top: -220px; border-radius: 50%; background: radial-gradient(circle, #ff4d0059, transparent 65%); pointer-events: none; }
+    .topbar > * { position: relative; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; font: 500 12px/1.3 var(--sans); letter-spacing: .02em; color: var(--hero-muted); margin-bottom: 10px; }
+    .eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--orange); }
+    h1 { font: 500 clamp(28px, 3.6vw, 40px)/1.15 var(--sans); letter-spacing: -.01em; }
+    .subtitle { margin-top: 8px; font-size: 14px; color: var(--hero-muted); }
+    .connection { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: var(--r-pill); background: #f5f5f71a; border: 1px solid #f5f5f726; backdrop-filter: blur(50px) saturate(1.6); white-space: nowrap; }
+    .connection-label { font: 500 12px/1.3 var(--sans); color: var(--hero-text); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #a1a1a6; flex: none; }
+    .status-dot.online { background: var(--green); box-shadow: 0 0 0 4px #00a66533; }
+    .status-dot.offline { background: var(--red); box-shadow: 0 0 0 4px #da2f3533; }
+
+    /* stats */
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+    .stat { padding: 18px 20px; border-radius: var(--r-m); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); }
+    .stat-label { font: 500 13px/1.3 var(--sans); color: var(--text-secondary); }
+    .stat-value { margin-top: 10px; font: 500 30px/1 var(--sans); letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+    .stat-hint { margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+
+    /* progress */
+    .capture-progress { display: grid; grid-template-columns: minmax(200px, .8fr) minmax(260px, 1.6fr); gap: 16px; align-items: center; padding: 16px 20px; margin-bottom: 16px; border-radius: var(--r-m); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); }
+    .progress-title { display: flex; align-items: baseline; gap: 10px; }
+    .progress-title strong { font: 500 14px/1.3 var(--sans); }
+    .progress-percent { font: 500 20px/1 var(--sans); color: var(--orange); font-variant-numeric: tabular-nums; }
+    .progress-meta, .progress-files { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+    .progress-meter { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border: 0; border-radius: var(--r-pill); background: var(--fill-tertiary); overflow: hidden; }
+    .progress-meter::-webkit-progress-bar { background: var(--fill-tertiary); border-radius: var(--r-pill); }
+    .progress-meter::-webkit-progress-value { background: var(--fill-primary); border-radius: var(--r-pill); transition: width .3s var(--ease-out); }
+    .progress-meter::-moz-progress-bar { background: var(--fill-primary); border-radius: var(--r-pill); }
+
+    /* workbench */
+    .workbench { border-radius: var(--r-l); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); overflow: hidden; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--stroke-2); }
+    .search { position: relative; flex: 1 1 260px; min-width: 200px; }
+    .search input { width: 100%; height: 36px; padding: 0 14px 0 36px; border-radius: var(--r-pill); border: 1px solid transparent; background: var(--fill-tertiary); transition: border-color var(--dur), background var(--dur); }
+    .search input:focus { outline: none; border-color: var(--stroke); background: var(--fill-card); }
+    .search-mark { position: absolute; left: 14px; top: 8px; color: var(--text-secondary); }
+    .filter-control { font-size: 12px; color: var(--text-secondary); }
+    .filter-select { height: 36px; padding: 0 30px 0 14px; border-radius: var(--r-pill); border: 1px solid var(--stroke); background: var(--fill-card); }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 16px; border-radius: var(--r-pill); border: 1px solid var(--stroke); background: var(--fill-card); font: 500 14px/1 var(--sans); text-decoration: none; color: var(--text-primary); transition: background var(--dur) var(--ease-out), transform var(--dur) var(--ease-out); }
+    .button:hover { background: var(--wash); }
+    .button:active { transform: scale(.97); }
+    .button.primary { background: var(--fill-primary); border-color: var(--fill-primary); color: var(--fill-on); }
+    .button.primary:hover { opacity: .88; background: var(--fill-primary); }
+    .button.danger { color: var(--red); border-color: transparent; background: var(--red-soft); }
+    .button.danger:hover { background: var(--red-soft); filter: brightness(.96); }
+    .button:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+    .button .count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--red); color: #fff; font-size: 11px; }
+    .toolbar-note { margin-left: auto; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+    .list-head, .file-card { display: grid; grid-template-columns: 30px minmax(220px, 1.8fr) minmax(80px, .6fr) minmax(90px, .6fr) minmax(140px, .9fr) 76px; gap: 14px; align-items: center; padding: 0 20px; }
+    .list-head { padding-top: 12px; padding-bottom: 10px; font: 500 12px/1.3 var(--sans); color: var(--text-secondary); }
+    .file-list { padding: 0 8px 8px; }
+    .file-card { min-height: 72px; padding: 10px 12px; border-radius: var(--r-s); transition: background var(--dur) var(--ease-out); }
+    .file-card:hover { background: var(--wash); }
+    .file-card:focus-visible { outline-offset: -2px; }
+    .check { width: 16px; height: 16px; accent-color: var(--fill-primary); }
+    .file-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .thumb { flex: 0 0 44px; height: 44px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: var(--r-xs); background: var(--fill-tertiary); color: var(--text-secondary); }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .thumb .file-icon { font: 500 10px/1 var(--sans); }
+    .file-copy { min-width: 0; }
+    .file-name { display: block; font: 500 14px/1.3 var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-meta { display: block; margin-top: 4px; font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cell { min-width: 0; font-size: 13px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .type-pill { display: inline-block; padding: 4px 10px; border-radius: var(--r-pill); background: var(--fill-tertiary); color: var(--text-primary); font: 500 12px/1.3 var(--sans); }
+    .type-pill.image { background: #00a6651f; color: var(--green); }
+    .type-pill.other { color: var(--text-secondary); }
+    .source { color: var(--text-secondary); }
+    .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--green); }
+    .status.pending { color: var(--orange); }
+    .status-dot.tiny { width: 6px; height: 6px; box-shadow: none; }
+    .row-actions { display: flex; justify-content: flex-end; gap: 4px; }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; border: 0; background: transparent; color: var(--text-secondary); transition: background var(--dur); }
+    .icon-button:hover { background: var(--wash); color: var(--text-primary); }
+    .icon-button.delete:hover { background: var(--red-soft); color: var(--red); }
+    .collapse-toggle { display: block; width: calc(100% - 8px); margin: 6px 4px 0; padding: 12px; border: 1px dashed var(--stroke); border-radius: var(--r-s); background: transparent; color: var(--text-secondary); font: 500 13px/1.3 var(--sans); transition: background var(--dur), color var(--dur); }
+    .collapse-toggle:hover { background: var(--wash); color: var(--text-primary); }
+    .empty { padding: 64px 20px; text-align: center; color: var(--text-secondary); }
+    .empty strong { display: block; margin-bottom: 6px; font: 500 17px/1.3 var(--sans); color: var(--text-primary); }
+    .empty p { font-size: 13px; }
+    .loading { padding: 56px; text-align: center; color: var(--text-secondary); }
+    .error { margin: 0 16px 12px; padding: 12px 16px; border-radius: var(--r-s); background: var(--red-soft); color: var(--red); font-size: 13px; }
+
+    /* settings */
+    .config { margin-top: 16px; padding: 24px; border-radius: var(--r-l); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); }
+    .config-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    .section-title { font: 500 20px/1.3 var(--sans); }
+    .config-group { padding: 18px 0; border-top: 1px solid var(--stroke-2); }
+    .config-group:first-of-type { border-top: 0; padding-top: 0; }
+    .group-title { margin-bottom: 12px; font: 500 12px/1.3 var(--sans); letter-spacing: .02em; color: var(--text-secondary); }
+    .config-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .field { padding: 14px 16px; border-radius: var(--r-m); background: var(--fill-on); border: 1px solid var(--stroke-2); }
+    .field > label:first-child { display: block; margin-bottom: 8px; font: 500 13px/1.3 var(--sans); color: var(--text-secondary); }
+    .field input:not([type="checkbox"]), .field textarea, .field select { width: 100%; padding: 9px 12px; border-radius: var(--r-xs); border: 1px solid var(--stroke); background: var(--fill-card); font-size: 14px; transition: border-color var(--dur); }
+    .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--fill-primary); }
+    .field textarea { min-height: 64px; resize: vertical; }
+    .field select[multiple] { min-height: 120px; padding: 6px; }
+    .field select[multiple] option { padding: 6px 8px; border-radius: 6px; }
+    .field-wide { grid-column: span 2; }
+    .field-full { grid-column: 1 / -1; }
+    .field-hint { display: block; margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
+    /* iOS 风格开关 */
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; font-size: 14px; cursor: pointer; }
+    .toggle-row input { -webkit-appearance: none; appearance: none; flex: none; position: relative; width: 44px; height: 26px; margin: 0; border-radius: var(--r-pill); background: var(--fill-tertiary); cursor: pointer; transition: background var(--dur) var(--ease-out); }
+    .toggle-row input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #0003; transition: transform var(--dur) var(--ease-out); }
+    .toggle-row input:checked { background: var(--green); }
+    .toggle-row input:checked::after { transform: translateX(18px); }
+    .field-value { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+    .field-value code { padding: 1px 6px; border-radius: 6px; background: var(--fill-tertiary); font-size: 12px; }
+    .help { margin-top: 16px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+
+    /* dialog */
+    dialog { width: 680px; max-width: min(680px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: var(--r-l); background: var(--fill-card); color: var(--text-primary); box-shadow: var(--shadow); }
+    dialog::backdrop { background: #0000004d; backdrop-filter: blur(8px); }
+    .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px 14px; }
+    .modal-title { font: 500 18px/1.3 var(--sans); overflow-wrap: anywhere; }
+    .modal-subtitle { margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+    .modal-body { max-height: 66vh; overflow: auto; padding: 0 22px 18px; }
+    .preview-frame { display: flex; align-items: center; justify-content: center; min-height: 170px; overflow: hidden; border-radius: var(--r-m); background: var(--fill-tertiary); }
+    .preview-frame img { display: block; max-width: 100%; max-height: 58vh; object-fit: contain; }
+    .preview-frame iframe { width: 100%; height: 55vh; border: 0; }
+    .preview-placeholder { padding: 40px 20px; text-align: center; font-size: 13px; color: var(--text-secondary); }
+    .details { display: grid; grid-template-columns: minmax(100px, .4fr) minmax(0, 1fr); gap: 10px 20px; margin-top: 18px; }
+    .details dt { font-size: 12px; color: var(--text-secondary); }
+    .details dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+    .modal-foot { display: flex; justify-content: flex-end; padding: 14px 22px 20px; }
+
+    .toast { position: fixed; left: 50%; bottom: 24px; z-index: 5; max-width: calc(100vw - 32px); padding: 11px 18px; border-radius: var(--r-pill); background: var(--fill-primary); color: var(--fill-on); font: 500 13px/1.3 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 12px); transition: opacity .2s var(--ease-out), transform .2s var(--ease-out); }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 900px) {
+      .app-shell { padding: 16px 14px 36px; }
+      .topbar { padding: 22px 20px; flex-direction: column; align-items: flex-start; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .capture-progress { grid-template-columns: 1fr; }
+      .list-head { display: none; }
+      .file-card { grid-template-columns: 26px minmax(0, 1fr) auto; align-items: start; }
+      .file-card > .cell { display: none; }
+      .file-main { align-items: flex-start; }
+      .file-meta { white-space: normal; }
+      .config { padding: 18px 16px; }
+      .config-grid { grid-template-columns: 1fr; }
+      .field-wide { grid-column: auto; }
+    }
+    @media (max-width: 540px) {
+      .toolbar-note { flex-basis: 100%; margin-left: 0; }
+      .button { flex: 1 1 auto; }
+      .search { flex-basis: 100%; }
+      .config-head { flex-direction: column; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">姓名文件查找器 · v1.7.0</div>
+        <h1>文件资料库</h1>
+        <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
+      </div>
+      <div class="connection" aria-live="polite"><span id="connectionDot" class="status-dot"></span><span id="connectionLabel" class="connection-label">正在连接</span></div>
+    </header>
+
+    <section class="stats" aria-label="统计">
+      <div class="stat"><div class="stat-label">已捕获文件</div><div id="statTotal" class="stat-value">-</div><div class="stat-hint">当前资料库</div></div>
+      <div class="stat"><div class="stat-label">图片</div><div id="statImages" class="stat-value">-</div><div class="stat-hint">支持预览与图片转表格</div></div>
+      <div class="stat"><div class="stat-label">文档与表格</div><div id="statDocuments" class="stat-value">-</div><div class="stat-hint">可下载原始文件</div></div>
+      <div class="stat"><div class="stat-label">已选择</div><div id="statSelected" class="stat-value">0</div><div class="stat-hint">准备批量操作</div></div>
+    </section>
+
+    <section class="capture-progress" aria-label="捕获进度">
+      <div><div class="progress-title"><strong>最近捕获任务</strong><span id="capturePercent" class="progress-percent">0%</span></div><div id="captureMeta" class="progress-meta">当前没有捕获任务</div></div>
+      <div><progress id="captureMeter" class="progress-meter" max="100" value="0"></progress><div id="captureFiles" class="progress-files">已捕获内容：暂无</div></div>
+    </section>
+
+    <section class="workbench" aria-label="文件管理">
+      <div class="toolbar">
+        <div class="search"><span class="search-mark" aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="按文件名、来源或类型筛选" autocomplete="off"></div>
+        <select id="typeFilter" class="filter-select" aria-label="按类型筛选"><option value="all">全部类型</option><option value="图片">图片</option><option value="文档">文档</option><option value="表格">表格</option><option value="演示文稿">演示文稿</option><option value="压缩文件">压缩文件</option><option value="其他">其他</option></select><select id="sourceFilter" class="filter-select" aria-label="按来源筛选"><option value="all">全部来源</option><option value="chat">聊天捕获</option><option value="upload">插件页上传</option><option value="local">本地识别导入</option><option value="latest">最近一次捕获</option></select><select id="statusFilter" class="filter-select" aria-label="按状态筛选"><option value="all">全部状态</option><option value="recognized">已识别</option><option value="pending">待识别 / 识别中</option><option value="failed">下载或识别失败</option></select>
+        <button id="refreshButton" class="button" type="button" title="重新读取文件列表">刷新</button>
+        <input id="uploadInput" class="visually-hidden" type="file" multiple>
+        <button id="uploadButton" class="button primary" type="button" title="从本机批量上传图片、文档或压缩包，由服务器识别">批量上传</button>
+        <input id="bundleInput" class="visually-hidden" type="file" accept=".zip,application/zip">
+        <button id="bundleButton" class="button" type="button" title="导入本地识别工具生成的识别包，服务器不再做 OCR">导入识别包</button>
+        <button id="selectAllButton" class="button" type="button">全选</button>
+        <button id="deleteSelectedButton" class="button danger" type="button" disabled>删除所选 <span id="selectedCount" class="count">0</span></button>
+        <button id="clearAllButton" class="button danger" type="button">一键清理</button>
+        <button id="clearFailedButton" class="button danger" type="button">清理下载失败</button>
+        <span id="toolbarNote" class="toolbar-note">-</span>
+      </div>
+      <div id="errorBox" class="error" hidden></div>
+      <div class="list-head" aria-hidden="true"><span></span><span>文件</span><span>类型</span><span>大小</span><span>来源 / 捕获时间</span><span></span></div>
+      <div id="fileList" class="file-list"><div class="loading">正在读取文件…</div></div>
+    </section>
+
+    <section class="config" aria-label="插件配置">
+      <div class="config-head"><h2 class="section-title">插件配置</h2><button id="saveConfigButton" class="button primary" type="button">保存配置</button></div>
+      <div class="config-group">
+        <div class="group-title">聊天范围与权限</div>
+        <div class="config-grid">
+          <div class="field"><label for="restrictChatScope">聊天范围</label><label class="toggle-row">仅在指定聊天中启用<input id="restrictChatScope" type="checkbox"></label></div>
+          <div class="field"><label for="allowedGroupIds">允许的群聊 ID</label><textarea id="allowedGroupIds" placeholder="多个用逗号分隔，* 表示全部"></textarea></div>
+          <div class="field"><label for="allowedPrivateIds">允许的私聊用户 ID</label><textarea id="allowedPrivateIds" placeholder="多个用逗号分隔，* 表示全部"></textarea></div>
+          <div class="field"><label for="adminOnlyCapture">文件捕获权限</label><label class="toggle-row">仅捕获管理员发送的文件<input id="adminOnlyCapture" type="checkbox"></label></div>
+          <div class="field field-wide"><label for="adminIds">管理员 ID</label><textarea id="adminIds" placeholder="用户 ID，多个用逗号分隔"></textarea></div>
+        </div>
+      </div>
+      <div class="config-group">
+        <div class="group-title">识别与审核</div>
+        <div class="config-grid">
+          <div class="field"><label for="visionEnabled">视觉模型识别</label><label class="toggle-row">用模型识别图片和文档<input id="visionEnabled" type="checkbox"></label></div>
+          <div class="field"><label for="visionReviewMaxPages">每份文件送审页数</label><input id="visionReviewMaxPages" type="number" min="1" max="12" step="1" placeholder="4"></div>
+          <div class="field"><label for="visionConsensusEnabled">多模型共识</label><label class="toggle-row">综合多个模型的结果<input id="visionConsensusEnabled" type="checkbox"></label></div>
+          <div class="field field-wide"><label for="visionModelTargets">视觉模型</label><select id="visionModelTargets" multiple size="5" aria-label="视觉模型"></select><small class="field-hint">可多选（按住 Ctrl / ⌘）；不选则使用当前会话的模型。</small></div>
+          <div class="field"><label for="llmReviewTarget">LLM 结果审核</label><select id="llmReviewTarget"></select><small class="field-hint">选“关闭”即不审核。</small></div>
+        </div>
+      </div>
+      <div class="config-group">
+        <div class="group-title">捕获与回复</div>
+        <div class="config-grid">
+          <div class="field"><label for="captureIntervalSeconds">批量捕获窗口（秒）</label><input id="captureIntervalSeconds" type="number" min="0" step="1" placeholder="30"><small class="field-hint">0 表示收到附件立即逐条处理。</small></div>
+          <div class="field"><label for="notifyEncodingIssues">乱码文件通告</label><label class="toggle-row">告知发送者转码的文件<input id="notifyEncodingIssues" type="checkbox"></label></div>
+          <div class="field"><label for="mergedForwardResults">查找结果样式</label><label class="toggle-row">使用合并转发聊天记录<input id="mergedForwardResults" type="checkbox"></label></div>
+        </div>
+      </div>
+      <div class="config-group">
+        <div class="group-title">压缩包</div>
+        <div class="config-grid">
+          <div class="field"><label for="archiveExtractionEnabled">压缩包捕获</label><label class="toggle-row">识别压缩包内的文件<input id="archiveExtractionEnabled" type="checkbox"></label></div>
+          <div class="field"><label for="archiveMaxDepth">嵌套层级上限</label><input id="archiveMaxDepth" type="number" min="0" max="8" step="1" placeholder="3"></div>
+          <div class="field"><label for="archiveMaxMembers">成员数量上限</label><input id="archiveMaxMembers" type="number" min="1" max="5000" step="1" placeholder="300"></div>
+          <div class="field"><label for="archiveMaxTotalSizeMb">解压总量上限（MB）</label><input id="archiveMaxTotalSizeMb" type="number" min="1" step="1" placeholder="200"></div>
+        </div>
+      </div>
+      <div class="config-group">
+        <div class="group-title">本地识别导入</div>
+        <div class="config-grid">
+          <div class="field field-wide"><label>大批量文件</label><div class="field-value">先在自己电脑上运行本地识别工具（name_searcher_local.py），再用“导入识别包”上传；服务器只校验和写索引，不跑 OCR。识别包很大时，也可以用 SFTP 放进存储目录下的 <code>import_inbox</code> 文件夹。</div></div>
+          <div class="field"><label>导入目录</label><button id="scanInboxButton" class="button" type="button">扫描导入目录</button></div>
+        </div>
+      </div>
+      <p class="help">存储目录、人员库文件、旧版面板地址和访问令牌只能在 AstrBot 插件配置中修改。清理文件请用文件列表上方的“一键清理”，只删除插件保存的副本，聊天原始消息不受影响。</p>
+    </section>
+  </main>
+
+  <dialog id="previewDialog" aria-labelledby="previewTitle">
+    <div class="modal-head"><div><h2 id="previewTitle" class="modal-title">文件预览</h2><p id="previewSubtitle" class="modal-subtitle"></p></div><button id="closePreviewButton" class="icon-button" type="button" title="关闭预览" aria-label="关闭预览">×</button></div>
+    <div class="modal-body"><div id="previewFrame" class="preview-frame"></div><dl id="previewDetails" class="details"></dl></div>
+    <div class="modal-foot"><a id="downloadLink" class="button primary" href="#" target="_blank" rel="noopener">下载文件</a></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script>
+    (() => {
+      const DEFAULT_PREFIX = '/api/name-searcher';
+      const configuredPrefix = window.NAME_SEARCHER_API || new URLSearchParams(location.search).get('api') || DEFAULT_PREFIX;
+      const API = String(configuredPrefix).replace(/\/$/, '');
+      // Some AstrBot versions mount the app below /api/name-searcher while
+      // others expose the Starlette routes directly below /api. A read-only
+      // 404 fallback keeps the page useful in either registration mode.
+      const API_CANDIDATES = [...new Set([API, ...(API === DEFAULT_PREFIX ? ['/api'] : [])])];
+      let activeApi = API;
+      const PATH_ALIASES = {'/files/bulk-delete': ['/files/bulk-delete', '/files/delete']};
+      const bridge = window.AstrBotPluginPage || null;
+      const useBridge = !!(bridge && typeof bridge.ready === 'function' && typeof bridge.apiGet === 'function' && typeof bridge.apiPost === 'function');
+      const bridgeReady = useBridge ? bridge.ready() : Promise.resolve(null);
+      const state = { files: [], filtered: [], selected: new Set(), config: {}, expanded: false, latest: new Set() };
+      const COLLAPSE_AT = 5;
+      const isLocal = file => (file.source || {}).upload_source === 'local-tool';
+      const isUpload = file => { const src = file.source || {}; return src.upload_source === 'plugin-page' || String(src.unified_msg_origin || '').startsWith('plugin-page'); };
+      const els = {
+        list: document.getElementById('fileList'), search: document.getElementById('searchInput'), error: document.getElementById('errorBox'),
+        note: document.getElementById('toolbarNote'), statusFilter: document.getElementById('statusFilter'), typeFilter: document.getElementById('typeFilter'), sourceFilter: document.getElementById('sourceFilter'), total: document.getElementById('statTotal'), images: document.getElementById('statImages'), docs: document.getElementById('statDocuments'), selected: document.getElementById('statSelected'), selectedCount: document.getElementById('selectedCount'),
+        dot: document.getElementById('connectionDot'), connection: document.getElementById('connectionLabel'), scope: document.getElementById('restrictChatScope'), groups: document.getElementById('allowedGroupIds'), privates: document.getElementById('allowedPrivateIds'), adminOnlyCapture: document.getElementById('adminOnlyCapture'), adminIds: document.getElementById('adminIds'), mergedForwardResults: document.getElementById('mergedForwardResults'),
+        progressPercent: document.getElementById('capturePercent'), progressMeta: document.getElementById('captureMeta'), progressMeter: document.getElementById('captureMeter'), progressFiles: document.getElementById('captureFiles'),
+        visionEnabled: document.getElementById('visionEnabled'), visionModelTargets: document.getElementById('visionModelTargets'), visionReviewMaxPages: document.getElementById('visionReviewMaxPages'), visionConsensusEnabled: document.getElementById('visionConsensusEnabled'), captureIntervalSeconds: document.getElementById('captureIntervalSeconds'), notifyEncodingIssues: document.getElementById('notifyEncodingIssues'), archiveExtractionEnabled: document.getElementById('archiveExtractionEnabled'), archiveMaxDepth: document.getElementById('archiveMaxDepth'), archiveMaxMembers: document.getElementById('archiveMaxMembers'), archiveMaxTotalSizeMb: document.getElementById('archiveMaxTotalSizeMb'), llmReviewTarget: document.getElementById('llmReviewTarget'),
+        uploadInput: document.getElementById('uploadInput'), uploadButton: document.getElementById('uploadButton'),
+        dialog: document.getElementById('previewDialog'), title: document.getElementById('previewTitle'), subtitle: document.getElementById('previewSubtitle'), frame: document.getElementById('previewFrame'), details: document.getElementById('previewDetails'), download: document.getElementById('downloadLink'), toast: document.getElementById('toast')
+      };
+      const text = (value, fallback = '-') => value === null || value === undefined || value === '' ? fallback : String(value);
+      const escape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const endpoint = (base, path) => `${base}${path.startsWith('/') ? path : `/${path}`}`;
+      const ACCESS_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+      const withToken = url => ACCESS_TOKEN && url && !/^(data:|blob:)/.test(url) ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(ACCESS_TOKEN)}` : url;
+      const asFileList = payload => Array.isArray(payload) ? payload : (payload && (payload.files || payload.items || payload.data)) || [];
+      const isImage = file => String(file.mime_type || file.mime || file.content_type || file.type || '').toLowerCase().startsWith('image/') || /\.(png|jpe?g|jpe|jfif|gif|webp|bmp|tiff?|ico|heic|heif|avif)$/i.test(text(file.name || file.filename));
+      const isSpreadsheet = file => /\.(xlsx?|xlsm|xlsb|ods|fods|csv|tsv)$/i.test(text(file.name || file.filename)) || /spreadsheet|excel|sheet/i.test(text(file.kind || file.mime_type || file.mime));
+      const isPresentation = file => /\.(pptx?|pptm|ppsx|odp|key)$/i.test(text(file.name || file.filename)) || /presentation|powerpoint/i.test(text(file.kind || file.mime_type || file.mime));
+      const isArchive = file => /\.(zip|rar|7z|tar|gz|bz2|xz)$/i.test(text(file.name || file.filename)) || /archive|compressed/i.test(text(file.kind || file.mime_type || file.mime));
+      const isDocument = file => !isImage(file) && (isSpreadsheet(file) || isPresentation(file) || /\.(pdf|docx?|docm|odt|rtf|txt|md|json|xml|html?|epub)$/i.test(text(file.name || file.filename)) || /document|pdf|text/i.test(text(file.kind || file.mime_type || file.mime)));
+      const fileId = file => text(file.id || file.file_id || file.key || file.path || file.name || file.filename);
+      const fileName = file => text(file.name || file.filename || file.original_name || fileId(file), '未命名文件');
+      const fileUrl = file => file.download_status === 'unavailable' ? '' : text(file.preview_data_url || file.preview_url || file.url || file.download_url || file.content_url || (!bridge && file.id ? withToken(endpoint(activeApi, `/files/${encodeURIComponent(file.id)}`)) : ''), '');
+      const formatSize = bytes => { const n = Number(bytes); if (!Number.isFinite(n) || n < 0) return '-'; if (n < 1024) return `${n} B`; if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`; if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`; return `${(n / 1073741824).toFixed(1)} GB`; };
+      const formatDate = value => { if (!value) return '-'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? text(value) : date.toLocaleString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}); };
+      const source = file => {
+        const nested = file && file.source && typeof file.source === 'object' ? file.source : {};
+        return text(file.source_name || file.source_label || file.sender_name || file.sender || file.chat_name || file.chat_id || nested.sender_name || nested.sender_id || nested.chat_name || nested.chat_id || nested.unified_msg_origin || nested.message_id);
+      };
+      const typeName = file => isImage(file) ? '图片' : isSpreadsheet(file) ? '表格' : isPresentation(file) ? '演示文稿' : isArchive(file) ? '压缩文件' : isDocument(file) ? '文档' : '其他';
+      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? '仅保存' : '已捕获';
+      const setConnection = online => { els.dot.className = `status-dot ${online ? 'online' : 'offline'}`; els.connection.textContent = online ? '服务已连接' : '服务不可用'; };
+      const showError = message => { els.error.textContent = message; els.error.hidden = !message; };
+      let toastTimer;
+      const toast = message => { clearTimeout(toastTimer); els.toast.textContent = message; els.toast.classList.add('show'); toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2600); };
+
+      async function request(path, options = {}) {
+        if (useBridge) {
+          await bridgeReady;
+          let lastError;
+          const paths = PATH_ALIASES[path] || [path];
+          for (const candidatePath of paths) {
+            const endpointName = candidatePath.replace(/^\/+/, '');
+            try {
+              const method = String(options.method || 'GET').toUpperCase();
+              const payload = options.body ? (typeof options.body === 'string' ? JSON.parse(options.body) : options.body) : undefined;
+              const result = method === 'GET' ? await bridge.apiGet(endpointName, options.params || {}) : await bridge.apiPost(endpointName, payload || {});
+              return result;
+            } catch (error) {
+              lastError = error;
+              if (paths.length === 1) throw error;
+            }
+          }
+          throw lastError || new Error('请求失败');
+        }
+        let lastError;
+        const bases = [activeApi, ...API_CANDIDATES.filter(base => base !== activeApi)];
+        const paths = PATH_ALIASES[path] || [path];
+        for (const candidatePath of paths) {
+          for (const base of bases) {
+            const response = await fetch(endpoint(base, candidatePath), { headers: {'Accept': 'application/json', ...(ACCESS_TOKEN ? {'Authorization': `Bearer ${ACCESS_TOKEN}`} : {}), ...(options.body ? {'Content-Type': 'application/json'} : {})}, ...options });
+            if (response.status === 404 && (base !== bases[bases.length - 1] || candidatePath !== paths[paths.length - 1])) continue;
+            if (!response.ok) {
+              const body = await response.text().catch(() => '');
+              lastError = new Error(body || `请求失败（${response.status}）`);
+              if (response.status !== 404) throw lastError;
+              break;
+            }
+            activeApi = base;
+            if (response.status === 204) return null;
+            const type = response.headers.get('content-type') || ''; return type.includes('json') ? response.json() : response.text();
+          }
+          if (lastError && candidatePath === paths[paths.length - 1]) break;
+        }
+        throw lastError || new Error('请求失败');
+      }
+
+      function updateStats() {
+        const selected = [...state.selected].filter(id => state.files.some(file => fileId(file) === id)).length;
+        const images = state.files.filter(isImage).length; const docs = state.files.filter(isDocument).length;
+        els.total.textContent = state.files.length; els.images.textContent = images; els.docs.textContent = docs; els.selected.textContent = selected; els.selectedCount.textContent = selected;
+        const deleteButton = document.getElementById('deleteSelectedButton');
+        deleteButton.disabled = selected === 0 || deleteButton.dataset.busy === '1';
+        const allVisibleSelected = state.filtered.length > 0 && state.filtered.every(file => state.selected.has(fileId(file)));
+        document.getElementById('selectAllButton').textContent = allVisibleSelected ? '取消全选' : '全选';
+      }
+      function render() {
+        const query = els.search.value.trim().toLowerCase(); const filter = els.statusFilter.value;
+        const typeWanted = els.typeFilter.value; const sourceWanted = els.sourceFilter.value;
+        state.filtered = state.files.filter(file => {
+          const failed = file.processing_status === 'failed' || file.download_status === 'unavailable' || file.download_status === 'failed' || file.extraction_status === 'failed';
+          const statusMatch = filter === 'failed' ? failed : filter === 'recognized' ? file.extraction_status === 'extracted' : filter === 'pending' ? !failed && (file.processing_status === 'queued' || file.processing_status === 'running') : true;
+          const typeMatch = typeWanted === 'all' || typeName(file) === typeWanted;
+          const sourceMatch = sourceWanted === 'all' || (sourceWanted === 'upload' ? isUpload(file) : sourceWanted === 'local' ? isLocal(file) : sourceWanted === 'chat' ? !isUpload(file) && !isLocal(file) : state.latest.has(fileId(file)) || state.latest.has(`name:${fileName(file)}`));
+          const textMatch = !query || [fileName(file), typeName(file), statusName(file), source(file), text(file.format), text(file.mime_type || file.mime), text(file.ocr_excerpt)].join(' ').toLowerCase().includes(query);
+          return statusMatch && typeMatch && sourceMatch && textMatch; });
+        els.note.textContent = `${state.filtered.length} / ${state.files.length} 个文件`;
+        if (!state.filtered.length) { els.list.innerHTML = `<div class="empty"><strong>${state.files.length ? '没有匹配的文件' : '还没有捕获文件'}</strong><p>${state.files.length ? '换个关键词或筛选条件试试。' : '当聊天中出现附件时，它们会出现在这里。'}</p></div>`; updateStats(); return; }
+        const hidden = state.expanded ? 0 : Math.max(0, state.filtered.length - COLLAPSE_AT);
+        const shown = hidden ? state.filtered.slice(0, COLLAPSE_AT) : state.filtered;
+        els.list.innerHTML = shown.map(file => {
+          const id = fileId(file); const image = isImage(file); const url = fileUrl(file); const checked = state.selected.has(id) ? ' checked' : ''; const captured = file.captured_at || file.created_at || file.timestamp || file.updated_at;
+          const thumb = image && url ? `<img src="${escape(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="file-icon">${escape(typeName(file).toUpperCase())}</span>`;
+          return `<article class="file-card" tabindex="0" data-id="${escape(id)}"><input class="check" type="checkbox" data-select="${escape(id)}" aria-label="选择 ${escape(fileName(file))}"${checked}><div class="file-main"><div class="thumb">${thumb}</div><div class="file-copy"><span class="file-name" title="${escape(fileName(file))}">${escape(fileName(file))}</span><span class="file-meta">${escape(text(file.mime_type || file.mime || typeName(file)))} · ${escape(statusName(file))}${captured ? ` · ${escape(formatDate(captured))}` : ''}</span></div></div><div class="cell"><span class="type-pill ${image ? 'image' : isDocument(file) ? '' : 'other'}">${typeName(file)}</span></div><div class="cell">${escape(formatSize(file.size || file.bytes || file.file_size))}</div><div class="cell source" title="${escape(source(file))}">${escape(source(file))}</div><div class="row-actions"><button class="icon-button" type="button" data-preview="${escape(id)}" title="预览" aria-label="预览 ${escape(fileName(file))}">查看</button><button class="icon-button delete" type="button" data-delete="${escape(id)}" title="删除" aria-label="删除 ${escape(fileName(file))}">删</button></div></article>`;
+        }).join('') + (state.filtered.length > COLLAPSE_AT ? `<button class="collapse-toggle" type="button" data-collapse>${hidden ? `展开其余 ${hidden} 个文件` : '收起'}</button>` : '');
+        updateStats();
+      }
+      function findFile(id) { return state.files.find(file => fileId(file) === id); }
+      async function showPreview(file) {
+        if (!file) return; const image = isImage(file); let url = fileUrl(file); els.title.textContent = fileName(file); els.subtitle.textContent = `${typeName(file)} · ${formatSize(file.size || file.bytes || file.file_size)}`;
+        if (useBridge && image && !url && file.id) {
+          try { const preview = await request(`/files/${encodeURIComponent(file.id)}/preview`); url = preview && (preview.data_url || preview.url) || ''; if (url) file.preview_data_url = url; } catch (error) { showError(`无法加载图片预览：${error.message}`); }
+        }
+        els.download.href = url || '#'; els.download.style.display = (url || (useBridge && file.id && file.download_status !== 'unavailable')) ? 'inline-flex' : 'none'; els.download.dataset.id = file.id || ''; els.download.dataset.name = fileName(file);
+        els.frame.innerHTML = image && url ? `<img src="${escape(url)}" alt="${escape(fileName(file))}">` : (!image && url && /application\/pdf|\.pdf$/i.test(`${file.mime_type || ''} ${fileName(file)}`) ? `<iframe src="${escape(url)}" title="${escape(fileName(file))}"></iframe>` : `<div class="preview-placeholder">此文件类型暂不支持内嵌预览，请使用“下载文件”。</div>`);
+        const confidence = Number(file.ocr_confidence); const clarity = Number(file.image_clarity);
+        const encoding = file.encoding_issue ? `${text(file.source_encoding, '未知编码')} -> UTF-8` : text(file.source_encoding, '无需转码'); const sheets = Number(file.sheet_count) > 0 ? `${file.sheet_count}（${Array.isArray(file.sheet_names) ? file.sheet_names.join('、') : ''}）` : '-';
+        const archiveSource = file.source && file.source.archive_member ? `${text(file.source.archive_name)} / ${text(file.source.archive_member)}` : '-';
+        const rows = [['文件名', fileName(file)], ['分类', typeName(file)], ['格式', text(file.format)], ['MIME', text(file.mime_type || file.mime)], ['状态', statusName(file)], ['大小', formatSize(file.size || file.bytes || file.file_size)], ['来源', source(file)], ['压缩包来源', archiveSource], ['压缩包成员数', text(file.archive_member_count)], ['压缩包状态', text(file.archive_extraction_status)], ['捕获时间', formatDate(file.captured_at || file.created_at || file.timestamp)], ['捕获次数', text(file.capture_count, '1')], ['文本编码', encoding], ['工作表数量', sheets], ['OCR 置信度', Number.isFinite(confidence) ? `${(confidence * 100).toFixed(1)}%` : '-'], ['图片清晰度', Number.isFinite(clarity) ? `${(clarity * 100).toFixed(1)}%` : '-'], ['识别文本', text(file.ocr_excerpt)], ['文件 ID', fileId(file)]];
+        els.details.innerHTML = rows.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(text(value))}</dd>`).join(''); if (typeof els.dialog.showModal === 'function') els.dialog.showModal(); else els.dialog.setAttribute('open', '');
+      }
+      function closePreview() { if (typeof els.dialog.close === 'function') els.dialog.close(); else els.dialog.removeAttribute('open'); }
+
+      function renderVisionTargetOptions(providers, selectedTargets) {
+        const options = providers.flatMap(item => (Array.isArray(item.models) && item.models.length ? item.models : ['']).map(model => ({value: model ? `${item.id || item.value}::${model}` : `${item.id || item.value}::`, label: model ? `${item.label || item.id} / ${model}` : `${item.label || item.id} / 默认模型`})));
+        selectedTargets.forEach(value => { if (!options.some(item => item.value === value)) options.push({value, label: `${value}（已配置）`}); });
+        return options.map(item => `<option value="${escape(item.value)}"${selectedTargets.includes(item.value) ? ' selected' : ''}>${escape(item.label)}</option>`).join('');
+      }
+
+      async function loadFiles() {
+        showError(''); els.list.innerHTML = '<div class="loading">正在读取文件…</div>';
+        try { const payload = await request('/files'); state.files = asFileList(payload); state.selected.clear(); setConnection(true); render(); }
+        catch (error) { state.files = []; state.selected.clear(); setConnection(false); render(); showError(`无法读取文件列表：${error.message}。请确认 AstrBot 插件已启用。`); }
+      }
+      async function loadProgress() {
+        try {
+          const payload = await request('/progress'); const progress = payload && payload.progress;
+          if (!progress) { els.progressPercent.textContent = '0%'; els.progressMeter.value = 0; els.progressMeta.textContent = '当前没有捕获任务'; els.progressFiles.textContent = '已捕获内容：暂无'; return; }
+          const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0)); const records = Array.isArray(progress.records) ? progress.records : [];
+          els.progressPercent.textContent = `${percent}%`; els.progressMeter.value = percent;
+          const stageNames = {collecting:'收集附件', downloading:'下载文件', extracting:'本地解析', vision_review:'视觉模型审核', waiting_memory:'内存不足，暂停中', consensus:'多模型共识', llm_review:'LLM 审核', completed:'完成', failed:'失败', cancelled:'已取消'}; const stage = stageNames[progress.stage] || text(progress.stage); const current = [text(progress.current_file, ''), text(progress.current_model, '')].filter(Boolean).join(' · '); const windowEnd = progress.window_ends_at ? ` · 窗口至 ${formatDate(progress.window_ends_at)}` : '';
+          els.progressMeta.textContent = `${progress.status === 'completed' ? '已完成' : progress.status === 'running' ? '进行中' : progress.status === 'collecting' ? '捕获窗口收集中' : text(progress.status)} · ${stage || '处理中'} · ${Number(progress.completed) || 0}/${Number(progress.total) || 0}${current ? ` · ${current}` : ''}${windowEnd}`;
+          const latest = new Set(records.flatMap(file => [fileId(file), `name:${fileName(file)}`].filter(Boolean))); const changed = latest.size !== state.latest.size || [...latest].some(key => !state.latest.has(key)); state.latest = latest; if (changed && els.sourceFilter.value === 'latest') render();
+          els.progressFiles.textContent = `已捕获内容：${records.length ? records.map(file => fileName(file)).join('、') : '暂无'}`;
+        } catch (_) { els.progressMeta.textContent = '暂时无法读取捕获进度'; }
+      }
+      async function removeFiles(ids) {
+        ids = [...new Set(ids.filter(Boolean))];
+        if (!ids.length) { toast('未选择文件'); return; }
+        const button = document.getElementById('deleteSelectedButton'); button.disabled = true; button.dataset.busy = '1';
+        try { const result = await request('/files/bulk-delete', {method:'POST', body: JSON.stringify({ids})}); const deleted = Array.isArray(result && result.deleted) ? result.deleted.length : ids.length; toast(`已删除 ${deleted} 个文件`); await loadFiles(); }
+        catch (error) { showError(`删除失败：${error.message}`); }
+        finally { button.dataset.busy = ''; updateStats(); }
+      }
+      async function clearAll() {
+        const buttons = [document.getElementById('clearAllButton')]; buttons.forEach(button => { button.disabled = true; button.dataset.busy = '1'; });
+        try { const result = await request('/files/clear', {method:'POST', body: JSON.stringify({scope:'downloads'})}); const deleted = Array.isArray(result && result.deleted) ? result.deleted.length : Number(result && (result.count ?? result.deleted)) || 0; toast(deleted ? `已清理 ${deleted} 个文件` : '没有可清理的文件'); await loadFiles(); await loadProgress(); }
+        catch (error) { showError(`清理失败：${error.message}`); }
+        finally { buttons.forEach(button => { button.disabled = false; button.dataset.busy = ''; }); }
+      }
+      async function clearFailed() {
+        const button = document.getElementById('clearFailedButton'); button.disabled = true; button.dataset.busy = '1';
+        try { const result = await request('/files/clear-failed', {method:'POST', body: JSON.stringify({})}); const deleted = Array.isArray(result && result.deleted) ? result.deleted.length : Number(result && (result.count ?? result.deleted)) || 0; toast(deleted ? `已清理 ${deleted} 个下载失败文件` : '没有下载失败的文件'); await loadFiles(); await loadProgress(); }
+        catch (error) { showError(`清理下载失败文件失败：${error.message}`); }
+        finally { button.disabled = false; button.dataset.busy = ''; }
+      }
+      const fileToBase64 = file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || '');
+        reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+        reader.readAsDataURL(file);
+      });
+      async function uploadFiles(files) {
+        const selected = [...files];
+        if (!selected.length) return;
+        const maxMb = Number(state.config.max_file_size_mb) || 25;
+        const oversized = selected.find(file => file.size > maxMb * 1024 * 1024);
+        if (oversized) { showError(`${oversized.name} 超过单文件 ${maxMb} MB 上限`); return; }
+        els.uploadButton.disabled = true; showError('');
+        let imported = 0; const failures = [];
+        try {
+          for (let index = 0; index < selected.length; index += 1) {
+            const file = selected[index];
+            els.uploadButton.textContent = `上传 ${index + 1}/${selected.length}`;
+            try {
+              const data = await fileToBase64(file);
+              const result = await request('/files/upload', {method:'POST', body: JSON.stringify({files:[{name:file.name, mime:file.type || 'application/octet-stream', data_base64:data}]})});
+              imported += Number(result && result.count) || 0;
+              if (Array.isArray(result && result.errors)) failures.push(...result.errors);
+            } catch (error) { failures.push(`${file.name}：${error.message}`); }
+          }
+          toast(`已上传并加入识别队列：${imported} 个文件`);
+          if (failures.length) showError(failures.join('；'));
+          await loadFiles(); await loadProgress();
+        } finally {
+          els.uploadButton.disabled = false; els.uploadButton.textContent = '批量上传'; els.uploadInput.value = '';
+        }
+      }
+      const isOn = (value, fallback) => value === undefined || value === null || value === '' ? fallback : value === true || String(value).toLowerCase() === 'true';
+      const splitTargets = raw => Array.isArray(raw) ? raw.map(String).map(item => item.trim()).filter(Boolean) : String(raw || '').split(/[\r\n,，;；]+/).map(item => item.trim()).filter(Boolean);
+      function renderLlmOptions(providers, current) {
+        const options = [{value: '__off__', label: '关闭'}, {value: '', label: '当前会话模型'}];
+        providers.forEach(item => (Array.isArray(item.models) && item.models.length ? item.models : ['']).forEach(model => options.push({value: `${item.id || item.value}::${model}`, label: model ? `${item.label || item.id} / ${model}` : `${item.label || item.id} / 默认模型`})));
+        if (!options.some(item => item.value === current)) options.push({value: current, label: `${current}（已配置）`});
+        els.llmReviewTarget.innerHTML = options.map(item => `<option value="${escape(item.value)}"${item.value === current ? ' selected' : ''}>${escape(item.label)}</option>`).join('');
+      }
+      async function loadConfig() {
+        try { state.config = (await request('/config')) || {}; } catch (_) { state.config = {}; }
+        const c = state.config;
+        els.scope.checked = isOn(c.restrict_chat_scope, true);
+        els.groups.value = c.allowed_group_ids ?? ''; els.privates.value = c.allowed_private_ids ?? '';
+        els.adminOnlyCapture.checked = isOn(c.admin_only_capture, false); els.adminIds.value = c.admin_ids ?? '';
+        els.mergedForwardResults.checked = isOn(c.merged_forward_results, true);
+        els.visionEnabled.checked = isOn(c.vision_enabled, true);
+        els.visionReviewMaxPages.value = c.vision_review_max_pages ?? 4;
+        els.visionConsensusEnabled.checked = isOn(c.vision_consensus_enabled, true);
+        els.notifyEncodingIssues.checked = isOn(c.notify_encoding_issues, true);
+        els.captureIntervalSeconds.value = isOn(c.capture_window_enabled, true) ? (c.capture_interval_seconds ?? 30) : 0;
+        els.archiveExtractionEnabled.checked = isOn(c.archive_extraction_enabled, true);
+        els.archiveMaxDepth.value = c.archive_max_depth ?? 3; els.archiveMaxMembers.value = c.archive_max_members ?? 300; els.archiveMaxTotalSizeMb.value = c.archive_max_total_size_mb ?? 200;
+        const providers = Array.isArray(c.vision_provider_options) ? c.vision_provider_options : [];
+        let targets = splitTargets(c.vision_model_targets);
+        // 旧版单模型设置并入多选列表
+        if (!targets.length && (c.vision_provider || c.vision_model)) targets = [`${c.vision_provider || ''}::${c.vision_model || ''}`];
+        els.visionModelTargets.innerHTML = renderVisionTargetOptions(providers, targets);
+        const llmCurrent = !isOn(c.llm_review_enabled, false) ? '__off__' : (c.llm_review_provider || c.llm_review_model ? `${c.llm_review_provider || ''}::${c.llm_review_model || ''}` : '');
+        renderLlmOptions(providers, llmCurrent);
+      }
+      async function saveConfig() {
+        const interval = Math.max(0, Math.floor(Number(els.captureIntervalSeconds.value) || 0));
+        const llm = els.llmReviewTarget.value; const [llmProvider, llmModel] = llm === '__off__' || llm === '' ? ['', ''] : [llm.split('::')[0], llm.split('::').slice(1).join('::')];
+        const payload = {
+          restrict_chat_scope: els.scope.checked, allowed_group_ids: els.groups.value.trim(), allowed_private_ids: els.privates.value.trim(),
+          admin_only_capture: els.adminOnlyCapture.checked, admin_ids: els.adminIds.value.trim(), merged_forward_results: els.mergedForwardResults.checked,
+          vision_enabled: els.visionEnabled.checked, vision_model_targets: [...els.visionModelTargets.selectedOptions].map(option => option.value).join('\n'), vision_provider: '', vision_model: '',
+          vision_review_max_pages: Math.max(1, Math.min(12, Number(els.visionReviewMaxPages.value) || 4)), vision_consensus_enabled: els.visionConsensusEnabled.checked,
+          llm_review_enabled: llm !== '__off__', llm_review_provider: llmProvider, llm_review_model: llmModel,
+          capture_window_enabled: interval > 0, capture_interval_seconds: interval > 0 ? interval : (Number(state.config.capture_interval_seconds) || 30),
+          notify_encoding_issues: els.notifyEncodingIssues.checked,
+          archive_extraction_enabled: els.archiveExtractionEnabled.checked, archive_max_depth: Math.max(0, Math.min(8, Number(els.archiveMaxDepth.value) || 0)),
+          archive_max_members: Math.max(1, Math.min(5000, Number(els.archiveMaxMembers.value) || 300)), archive_max_total_size_mb: Math.max(1, Number(els.archiveMaxTotalSizeMb.value) || 200)
+        };
+        const button = document.getElementById('saveConfigButton'); button.disabled = true;
+        try { await request('/config', {method:'PATCH', body: JSON.stringify(payload)}); toast('配置已保存'); await loadConfig(); }
+        catch (error) { showError(`保存配置失败：${error.message}`); }
+        finally { button.disabled = false; }
+      }
+      document.getElementById('refreshButton').addEventListener('click', () => { loadFiles(); loadProgress(); });
+      document.getElementById('selectAllButton').addEventListener('click', () => { const all = state.filtered.length > 0 && state.filtered.every(file => state.selected.has(fileId(file))); state.filtered.forEach(file => all ? state.selected.delete(fileId(file)) : state.selected.add(fileId(file))); render(); });
+      document.getElementById('deleteSelectedButton').addEventListener('click', () => removeFiles([...state.selected]));
+      document.getElementById('clearAllButton').addEventListener('click', clearAll);
+      document.getElementById('clearFailedButton').addEventListener('click', clearFailed);
+      document.getElementById('saveConfigButton').addEventListener('click', saveConfig);
+      els.uploadButton.addEventListener('click', () => els.uploadInput.click());
+      const bundleInput = document.getElementById('bundleInput'); const bundleButton = document.getElementById('bundleButton');
+      const blobToBase64 = blob => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || ''); reader.onerror = () => reject(reader.error || new Error('读取文件失败')); reader.readAsDataURL(blob); });
+      const importSummary = result => `新增 ${Number(result.created) || 0}，补全 ${Number(result.updated) || 0}，已存在 ${Number(result.exists) || 0}`;
+      async function importBundle(file) {
+        if (!file) return;
+        const CHUNK = 2 * 1024 * 1024; const uploadId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`.replace(/[^A-Za-z0-9]/g, '').padEnd(12, '0');
+        bundleButton.disabled = true; showError('');
+        try {
+          for (let offset = 0; offset < file.size; offset += CHUNK) {
+            bundleButton.textContent = `上传 ${Math.floor(offset * 100 / file.size)}%`;
+            const data = await blobToBase64(file.slice(offset, offset + CHUNK));
+            await request('/import/chunk', {method:'POST', body: JSON.stringify({upload_id: uploadId, offset, data_base64: data})});
+          }
+          bundleButton.textContent = '导入中…';
+          const result = await request('/import/finish', {method:'POST', body: JSON.stringify({upload_id: uploadId, name: file.name})});
+          toast(`识别包已导入：${importSummary(result || {})}`);
+          if (result && Array.isArray(result.errors) && result.errors.length) showError(result.errors.slice(0, 20).join('；'));
+          await loadFiles();
+        } catch (error) { showError(`导入识别包失败：${error.message}`); }
+        finally { bundleButton.disabled = false; bundleButton.textContent = '导入识别包'; bundleInput.value = ''; }
+      }
+      bundleButton.addEventListener('click', () => bundleInput.click());
+      bundleInput.addEventListener('change', () => importBundle(bundleInput.files[0]));
+      document.getElementById('scanInboxButton').addEventListener('click', async event => {
+        const button = event.currentTarget; button.disabled = true;
+        try {
+          const result = await request('/import/scan', {method:'POST', body: JSON.stringify({})}); const bundles = Array.isArray(result && result.bundles) ? result.bundles : [];
+          toast(bundles.length ? bundles.map(item => item.ok === false ? `${item.bundle}：${item.message}` : `${item.bundle}：${importSummary(item)}`).join('；') : '导入目录里没有识别包');
+          const errors = bundles.flatMap(item => Array.isArray(item.errors) ? item.errors : []); if (errors.length) showError(errors.slice(0, 20).join('；'));
+          await loadFiles();
+        } catch (error) { showError(`扫描导入目录失败：${error.message}`); }
+        finally { button.disabled = false; }
+      });
+      els.uploadInput.addEventListener('change', () => uploadFiles(els.uploadInput.files));
+      els.search.addEventListener('input', render);
+      [els.statusFilter, els.typeFilter, els.sourceFilter].forEach(select => select.addEventListener('change', () => { state.expanded = false; render(); }));
+      els.list.addEventListener('change', event => { const checkbox = event.target.closest('[data-select]'); if (!checkbox) return; const id = checkbox.dataset.select; checkbox.checked ? state.selected.add(id) : state.selected.delete(id); updateStats(); });
+      els.list.addEventListener('click', event => { if (event.target.closest('[data-collapse]')) { state.expanded = !state.expanded; render(); return; } const preview = event.target.closest('[data-preview]'); const remove = event.target.closest('[data-delete]'); if (preview) showPreview(findFile(preview.dataset.preview)); if (remove) removeFiles([remove.dataset.delete]); });
+      els.list.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const card = event.target.closest('.file-card'); if (card && event.target === card) { event.preventDefault(); showPreview(findFile(card.dataset.id)); } });
+      document.getElementById('closePreviewButton').addEventListener('click', closePreview); els.dialog.addEventListener('click', event => { if (event.target === els.dialog) closePreview(); });
+      els.download.addEventListener('click', async event => {
+        if (!useBridge) return;
+        event.preventDefault();
+        const id = els.download.dataset.id;
+        if (!id) return;
+        try { await bridge.download(`files/${encodeURIComponent(id)}/content`, {}, els.download.dataset.name || 'download'); }
+        catch (error) { showError(`下载失败：${error.message}`); }
+      });
+      loadFiles(); loadConfig(); loadProgress(); window.setInterval(loadProgress, 1000);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# runtime data (captured files, index) — never commit
+data/
+ns_local_work/
+__pycache__/
+*.pyc
+*.zip
+.ssh/
+.tmp_*
+.remote_*
