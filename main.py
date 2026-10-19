@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.1"
+PLUGIN_VERSION = "1.8.2"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -3395,6 +3395,7 @@ def _panel_config_view(plugin: "NameSearcherPlugin") -> dict[str, Any]:
     payload = {key: value for key, value in plugin.config.items() if key not in PANEL_SECRET_KEYS}
     payload["panel_access_token_set"] = bool(str(plugin.config.get("panel_access_token") or "").strip())
     payload["panel_locked_keys"] = sorted(PANEL_LOCKED_KEYS)
+    payload["plugin_version"] = PLUGIN_VERSION
     payload["vision_provider_options"] = _provider_options(plugin.context)
     payload["llm_review_provider_options"] = payload["vision_provider_options"]
     return payload

@@ -203,6 +203,16 @@ class NameSearcherPluginTests(unittest.TestCase):
         asyncio.run(quiet.capture_event(quiet_event))
         self.assertFalse(any("未识别" in str(item) for item in quiet_event.sent))
 
+    def test_panel_pages_show_current_version(self):
+        root = Path(main.__file__).resolve().parent
+        for relative in ("pages/name-searcher/index.html", "plugin-page/index.html", "webui/index.html"):
+            html = (root / relative).read_text(encoding="utf-8")
+            self.assertIn(f'<span id="pluginVersion">v{main.PLUGIN_VERSION}</span>', html, relative)
+        metadata = (root / "metadata.yaml").read_text(encoding="utf-8")
+        self.assertIn(f"version: {main.PLUGIN_VERSION}", metadata)
+        plugin = make_plugin(self.temp_path)
+        self.assertEqual(main._panel_config_view(plugin)["plugin_version"], main.PLUGIN_VERSION)
+
     def test_archive_without_limits_has_no_notice(self):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:

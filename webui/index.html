@@ -207,7 +207,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">姓名文件查找器 · v1.7.0</div>
+        <div class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.2</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -533,6 +533,7 @@
       async function loadConfig() {
         try { state.config = (await request('/config')) || {}; } catch (_) { state.config = {}; }
         const c = state.config;
+        if (c.plugin_version) { const v = document.getElementById('pluginVersion'); if (v) v.textContent = `v${c.plugin_version}`; }
         els.scope.checked = isOn(c.restrict_chat_scope, true);
         els.groups.value = c.allowed_group_ids ?? ''; els.privates.value = c.allowed_private_ids ?? '';
         els.adminOnlyCapture.checked = isOn(c.admin_only_capture, false); els.adminIds.value = c.admin_ids ?? '';
