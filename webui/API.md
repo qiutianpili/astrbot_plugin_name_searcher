@@ -146,7 +146,7 @@ Plugin Page 本地批量上传接口。为兼容 AstrBot Page bridge，请求使
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/import/chunk` | `{upload_id, offset, data_base64}`，按顺序追加分片（单片 ≤ 8MB）。`offset` 与已收到的大小不一致时返回 409 和 `received`。 |
-| POST | `/import/finish` | `{upload_id, name}`，导入已上传的识别包，返回 `{created, updated, exists, skipped, errors, total}`。 |
-| POST | `/import/scan` | 导入存储目录 `import_inbox/*.zip`，完成后移到 `import_inbox/done/`。 |
+| POST | `/import/finish` | `{upload_id, name, sha256}`，先校验整个识别包的 SHA256（缺失或不一致返回 422），再导入，返回 `{created, updated, exists, skipped, errors, total, sha256, sha256_verified}`。 |
+| POST | `/import/scan` | 导入存储目录 `import_inbox/*.zip`（每个包须有同名 `.zip.sha256`），完成后连同识别码文件移到 `import_inbox/done/`。 |
 
 识别包是 zip：`manifest.json`（`format: "name-searcher-bundle"`, `version: 1`, `records: [...]`，每条记录带 `bundle_file` 与 `sha256`）+ `files/` 下的原文件。

@@ -435,7 +435,17 @@ class App:
                 self.btn_bundle.configure(state="normal")
                 self.bar.configure(value=self.bar["maximum"])
                 self.log(f"识别包：{bundle}", "ok")
-                if not self.closing and messagebox.askyesno("完成", f"识别包已生成：\n{bundle}\n\n打开所在文件夹吗？"):
+                digest = ""
+                sidecar = Path(bundle).with_name(Path(bundle).name + ".sha256")
+                try:
+                    digest = sidecar.read_text(encoding="utf-8").split()[0]
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(digest)
+                    self.log("SHA256 识别码已复制到剪贴板", "ok")
+                except (OSError, IndexError, tk.TclError):
+                    pass
+                code = f"\n\nSHA256 识别码（已复制）：\n{digest}\n导入时把 zip 和 {sidecar.name} 一起选上，或粘贴识别码。" if digest else ""
+                if not self.closing and messagebox.askyesno("完成", f"识别包已生成：\n{bundle}{code}\n\n打开所在文件夹吗？"):
                     self.open_bundle()
 
 

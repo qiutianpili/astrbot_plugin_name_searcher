@@ -213,6 +213,18 @@ class NameSearcherPluginTests(unittest.TestCase):
         plugin = make_plugin(self.temp_path)
         self.assertEqual(main._panel_config_view(plugin)["plugin_version"], main.PLUGIN_VERSION)
 
+    def test_vision_page_limit_and_hero_status(self):
+        self.assertEqual(main._vision_page_limit(0), main.VISION_PAGES_HARD_CAP)
+        self.assertEqual(main._vision_page_limit(-3), main.VISION_PAGES_HARD_CAP)
+        self.assertEqual(main._vision_page_limit(30), 30)
+        self.assertEqual(main._vision_page_limit(999), main.VISION_PAGES_HARD_CAP)
+        self.assertEqual(main._vision_page_limit("x"), 10)
+        self.assertEqual(main.DEFAULT_CONFIG["vision_review_max_pages"], 10)
+        html = (Path(main.__file__).resolve().parent / "pages/name-searcher/index.html").read_text(encoding="utf-8")
+        self.assertIn(".eyebrow.online::before", html)
+        self.assertIn("@keyframes breathe", html)
+        self.assertIn('id="heroEyebrow"', html)
+
     def test_archive_without_limits_has_no_notice(self):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
@@ -858,8 +870,23 @@ class NameSearcherPluginTests(unittest.TestCase):
             result, status = plugin.import_chunk({"upload_id": "abcdef123456", "offset": offset, "data_base64": base64.b64encode(bundle[start:start + 1000]).decode()})
             self.assertEqual(status, 200, result)
             offset = result["received"]
-        summary, status = plugin.import_staged("abcdef123456", "测试包")
-        self.assertEqual(status, 200)
+        digest = (self.temp_path / "bundle.zip.sha256").read_text(encoding="utf-8").split()[0]
+        self.assertEqual(digest, main._file_sha256(self.temp_path / "bundle.zip"))
+        missing, status = plugin.import_staged("abcdef123456", "测试包")
+        self.assertEqual(status, 422)
+        self.assertIn("缺少 SHA256", missing["message"])
+        self.assertFalse(plugin.store.list())
+        for start in range(0, len(bundle), 1000):
+            plugin.import_chunk({"upload_id": "abcdef123456", "offset": start, "data_base64": base64.b64encode(bundle[start:start + 1000]).decode()})
+        wrong, status = plugin.import_staged("abcdef123456", "测试包", "0" * 64)
+        self.assertEqual(status, 422)
+        self.assertIn("SHA256 校验失败", wrong["message"])
+        self.assertFalse(plugin.store.list())
+        for start in range(0, len(bundle), 1000):
+            plugin.import_chunk({"upload_id": "abcdef123456", "offset": start, "data_base64": base64.b64encode(bundle[start:start + 1000]).decode()})
+        summary, status = plugin.import_staged("abcdef123456", "测试包", f"{digest.upper()}  bundle.zip")
+        self.assertEqual(status, 200, summary)
+        self.assertTrue(summary["sha256_verified"])
         self.assertEqual(summary["created"], 2)
         self.assertTrue(all(item.get("processing_status") == "completed" for item in plugin.store.list()))
         self.assertTrue(all((item.get("source") or {}).get("upload_source") == "local-tool" for item in plugin.store.list()))
@@ -867,7 +894,7 @@ class NameSearcherPluginTests(unittest.TestCase):
         again, _ = plugin.import_staged("abcdef123456")
         self.assertFalse(again.get("ok", True))
         result, status = plugin.import_chunk({"upload_id": "abcdef654321", "offset": 0, "data_base64": base64.b64encode(bundle).decode()})
-        summary, _ = plugin.import_staged("abcdef654321")
+        summary, _ = plugin.import_staged("abcdef654321", "", digest)
         self.assertEqual((summary["created"], summary["exists"]), (0, 2))
 
     def test_bundle_import_rejects_bad_ids_order_and_tampering(self):
@@ -882,11 +909,21 @@ class NameSearcherPluginTests(unittest.TestCase):
                 data = original.read(name)
                 copy.writestr(name, data + b"!" if name.startswith("files/") else data)
         result = plugin.import_from_inbox()
+        self.assertFalse(result["bundles"][0]["ok"])
+        self.assertIn("缺少 SHA256", result["bundles"][0]["message"])
+        (plugin.import_inbox() / "tampered.zip.sha256").write_text("f" * 64, encoding="utf-8")
+        result = plugin.import_from_inbox()
+        self.assertIn("SHA256 校验失败", result["bundles"][0]["message"])
+        self.assertTrue(tampered.exists())
+        (plugin.import_inbox() / "tampered.zip.sha256").write_text(main._file_sha256(tampered) + "  tampered.zip\n", encoding="utf-8")
+        result = plugin.import_from_inbox()
         self.assertEqual(result["bundles"][0]["created"], 0)
         self.assertEqual(len(result["bundles"][0]["errors"]), 2)
         self.assertTrue((plugin.import_inbox() / "done" / "tampered.zip").exists())
+        self.assertTrue((plugin.import_inbox() / "done" / "tampered.zip.sha256").exists())
         not_bundle = plugin.import_inbox() / "x.zip"
         not_bundle.write_bytes(b"not a zip")
+        (plugin.import_inbox() / "x.zip.sha256").write_text(main._file_sha256(not_bundle), encoding="utf-8")
         self.assertFalse(plugin.import_from_inbox()["bundles"][0]["ok"])
 
     def test_storage_lives_outside_plugin_folder(self):
@@ -1599,6 +1636,39 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertNotIn("model_review_status", plugin.store.get(sheet["id"]))
         self.assertEqual(plugin.queue_model_review()["queued"], 0)
         self.assertFalse(make_plugin(self.temp_path / "off", vision_enabled=False).queue_model_review()["ok"])
+
+    def test_vision_pages_beyond_limit_keep_local_text(self):
+        try:
+            fitz = main._import_fitz()
+        except ImportError:
+            self.skipTest("PyMuPDF 未安装")
+        pdf = self.temp_path / "long.pdf"
+        document = fitz.open()
+        for index in range(5):
+            document.new_page().insert_text((72, 72), f"Roster page {index + 1} Person{index + 1}")
+        document.save(str(pdf))
+        document.close()
+        plugin = make_plugin(self.temp_path, vision_enabled=True, vision_review_max_pages=2, llm_review_enabled=False)
+        record = plugin.store.add_bytes("long.pdf", pdf.read_bytes(), kind="document", mime="application/pdf", source={"upload_source": "local-tool"})
+        plugin.store.update(record["id"], ocr_text="local all pages", extraction_status="extracted", processing_status="completed")
+        calls = []
+
+        async def vision_call(*_args, **_kwargs):
+            calls.append(1)
+            return f"vision page {len(calls)}", "mock-vision"
+
+        async def scenario():
+            plugin.queue_model_review([record["id"]])
+            await plugin._model_review_task
+
+        with patch.object(main, "_call_vision_model", side_effect=vision_call):
+            asyncio.run(scenario())
+        done = plugin.store.get(record["id"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((done["vision_pages_reviewed"], done["vision_pages_total"]), (2, 5))
+        self.assertIn("第 3–5 页未经视觉模型复核", done["ocr_text"])
+        self.assertIn("Person5", done["ocr_text"])
+        self.assertNotIn("Person1", done["ocr_text"])
 
     def test_local_tool_runs_are_independent_and_accept_files(self):
         import subprocess

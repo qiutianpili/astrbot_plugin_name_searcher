@@ -75,7 +75,7 @@ PATCH /config
 
 `admin_only_capture` 开启后，插件只捕获 `admin_ids` 中用户发送的附件。多个管理员 ID 可用逗号、分号、空格或换行分隔；管理员列表为空时不会捕获任何文件。此限制只作用于文件捕获，不会额外限制 `/查找` 等命令。
 
-`capture_window_enabled` 控制时间窗口捕获，`capture_interval_seconds` 默认 30 秒。`vision_model_targets` 和 `llm_review_targets` 都可写多行 `provider::model`（插件页可直接多选）；多个审核模型时由第一个模型按 `llm_review_consensus_prompt` 汇总。`vision_file_scope` 默认 `image_pdf`，视觉识别和 LLM 审核只处理图片和 PDF，改成 `all` 则处理所有文件；`vision_review_max_pages` 限制每份文件送审页数，`vision_consensus_enabled` 控制多个模型结果的共识审核。
+`capture_window_enabled` 控制时间窗口捕获，`capture_interval_seconds` 默认 30 秒。`vision_model_targets` 和 `llm_review_targets` 都可写多行 `provider::model`（插件页可直接多选）；多个审核模型时由第一个模型按 `llm_review_consensus_prompt` 汇总。`vision_file_scope` 默认 `image_pdf`，视觉识别和 LLM 审核只处理图片和 PDF，改成 `all` 则处理所有文件；`vision_review_max_pages` 限制每份文件送审页数（默认 10，0 = 全部页，上限 100），`vision_consensus_enabled` 控制多个模型结果的共识审核。
 
 `notify_encoding_issues` 控制乱码文件通告。开启时，一次捕获批次中检测到的非 UTF-8 或乱码文件会汇总发送给查询发起人，列明文件名、源编码和修复方式；关闭仅停止通告，自动转码与识别仍会继续。
 
@@ -84,6 +84,12 @@ PATCH /config
 `merged_forward_results` 控制 `/查找` 的输出样式。开启后，每个匹配结果会显示为一条合并转发聊天记录，并尽量携带对应文件或图片；目前 QQ/OneBot 等支持 `Nodes` 消息组件的适配器体验最完整。
 
 查找视觉模型输出时会兼容 Markdown 包裹、HTML 实体、零宽字符、全半角差异、姓名间标点和 `\\uXXXX` 转义文本。上述处理只生成搜索键，面板及索引中仍保留模型原始输出，便于核对。
+
+## 1.8.3 更新
+
+- 识别包 SHA256 识别码：本地工具打包后生成 `bundle-时间.zip.sha256`（sha256sum 格式），日志里显示识别码，GUI 会自动复制到剪贴板。插件页“导入识别包”时把 zip 和 .sha256 一起选上（或按提示粘贴识别码），服务器先校验整个识别包的 SHA256，不一致直接拒绝，校验通过才导入；`import_inbox/` 里的包也必须带同名 `.sha256`。
+- `vision_review_max_pages` 默认改为 10，`0` 表示全部页（上限 100）。超出送审页数的 PDF 页会把本地识别结果接在视觉结果后面，文件详情显示“视觉复核页数”。
+- 插件页顶部圆点显示服务状态：在线时绿色呼吸灯，离线时静态红色。
 
 ## 1.8.2 更新
 
@@ -113,9 +119,9 @@ PATCH /config
    - 用的是和插件完全相同的识别代码（RapidOCR、PDF/Office/表格解析、压缩包展开）。
    - 1.8.0 起每次识别都是独立的：结果放在 `ns_local_work/runs/时间/`，识别包只含本次的文件，不会把上次识别过的文件再打进去。中途停止后可以“打包本次结果”。
 3. 结束后生成 `bundle-时间.zip`。打开插件页，点“导入识别包”选择它。
-   - 识别包按 2MB 分片上传，服务器逐个文件校验 sha256 后写入，索引只写一次，不做 OCR。
+   - 识别包按 2MB 分片上传；服务器先用 `.sha256` 识别码校验整个识别包，再逐个文件校验 sha256 后写入，索引只写一次，不做 OCR。
    - 重复文件不会重复导入；服务器上没识别完的同一文件会直接用识别包里的结果补全。
-   - 很大的识别包也可以用 SFTP 放进存储目录下的 `import_inbox/`，再点“扫描导入目录”。导入完成的包会移到 `import_inbox/done/`。
+   - 很大的识别包也可以用 SFTP 连同 `.sha256` 文件一起放进存储目录下的 `import_inbox/`，再点“扫描导入目录”。导入完成的包会移到 `import_inbox/done/`。
 4. 来源筛选里选“本地识别导入”可以只看这些文件。
 
 本地工具不会调用 AstrBot 的视觉模型和 LLM 审核（那些依赖 AstrBot 的模型提供商）。1.8.0 起，导入后由插件在后台补跑：开启 `import_model_review`（默认开）且开启了视觉识别或 LLM 审核时，识别包里的图片和 PDF 会逐个交给所选视觉模型识别，再由所选 LLM 审核修正；已有文件可在插件页点“补跑模型识别”（勾选文件则只补跑选中的）。

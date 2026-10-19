@@ -70,8 +70,8 @@
   "vision_review_max_pages": {
     "description": "每份文件最大视觉审阅页数",
     "type": "int",
-    "hint": "PDF、DOCX 和其他文件最多提交的审阅页或内嵌图片数量，范围 1 到 12。",
-    "default": 4
+    "hint": "每个文件最多交给视觉模型复核的页数（PDF 页、DOCX 内嵌图片或文字页），每页每个模型调用一次。0 表示全部页（最多 100 页）。超出部分仍保留本地识别结果，姓名搜索不受影响。",
+    "default": 10
   },
   "vision_consensus_enabled": {
     "description": "启用多模型共识审核",

@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.2"
+PLUGIN_VERSION = "1.8.3"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -186,7 +186,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_provider": "",
     "vision_model": "",
     "vision_model_targets": "",
-    "vision_review_max_pages": 4,
+    "vision_review_max_pages": 10,
     "vision_consensus_enabled": True,
     "vision_consensus_prompt": "请综合本地解析和多个视觉模型结果，逐行核对姓名、编号、班级、专业及表格列关系。不得概括、删行或合并不同人员；保留完整可检索原文和表格结构，只输出最终校正文本。",
     "vision_prompt": "请完整识别这份文件页面中的正文、表格和图片文字，逐行保留姓名、编号、班级、专业及所有单元格关系。不得概括、删行或合并不同人员，只输出可检索的完整原文。",
@@ -763,6 +763,46 @@ _IMPORT_DROPPED_FIELDS = frozenset({
     "capture_count", "sha256", "size", "download_status",
 })
 _IMPORT_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _parse_sha256(value: Any) -> str:
+    """Accept a bare hex digest or a sha256sum line ("<hex>  name")."""
+
+    text = str(value or "").strip().lower()
+    match = re.search(r"\b([0-9a-f]{64})\b", text)
+    return match.group(1) if match else ""
+
+
+def _sha256_sidecar(bundle: Path) -> Optional[Path]:
+    for candidate in (bundle.with_name(bundle.name + ".sha256"), bundle.with_suffix(".sha256")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _verify_bundle_sha256(bundle: Path, expected: Any) -> str:
+    """Check the whole bundle before anything is read from it. Returns the digest."""
+
+    wanted = _parse_sha256(expected)
+    if not wanted:
+        raise ValueError("缺少 SHA256 识别码：请同时选择本地工具生成的 .sha256 文件，或粘贴识别码")
+    actual = _file_sha256(bundle)
+    if actual != wanted:
+        raise ValueError(
+            f"SHA256 校验失败，识别包可能在传输中损坏或不是同一个文件（应为 {wanted[:12]}…，实际 {actual[:12]}…），已放弃导入"
+        )
+    return actual
 
 
 def _import_bundle(store: "ArtifactStore", bundle_path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
@@ -2881,6 +2921,47 @@ def _render_text_review_pages(text: str, output_dir: Path, max_pages: int) -> li
     return paths
 
 
+VISION_PAGES_HARD_CAP = 100
+
+
+def _vision_page_limit(value: Any) -> int:
+    """Pages sent to each vision model per file; 0 (or less) means all pages, up to the hard cap."""
+
+    try:
+        pages = int(float(value))
+    except (TypeError, ValueError):
+        pages = 10
+    if pages <= 0:
+        return VISION_PAGES_HARD_CAP
+    return min(pages, VISION_PAGES_HARD_CAP)
+
+
+def _import_fitz() -> Any:
+    try:
+        import pymupdf as fitz  # type: ignore
+    except ImportError:
+        import fitz  # type: ignore
+    return fitz
+
+
+def _pdf_page_count(path: Path) -> int:
+    try:
+        with _import_fitz().open(str(path)) as document:
+            return len(document)
+    except Exception:
+        return 0
+
+
+def _pdf_page_texts(path: Path, start: int) -> list[str]:
+    """Text layer of PDF pages from ``start`` (0-based) on; empty strings for scanned pages."""
+
+    try:
+        with _import_fitz().open(str(path)) as document:
+            return [str(document[index].get_text() or "").strip() for index in range(start, len(document))]
+    except Exception:
+        return []
+
+
 def _prepare_vision_review_images(
     path: Path,
     mime: str,
@@ -2891,7 +2972,7 @@ def _prepare_vision_review_images(
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS or mime.startswith("image/"):
         return [path]
-    max_pages = max(1, min(12, int(max_pages or 4)))
+    max_pages = _vision_page_limit(max_pages)
     if suffix == ".pdf":
         try:
             try:
@@ -3256,7 +3337,7 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "vision_models_completed", "vision_consensus_status", "llm_review_status",
         "encoding_issue", "encoding_status", "source_encoding", "target_encoding",
         "encoding_repair", "sheet_count", "sheet_names", "archive_member_count",
-        "archive_extraction_status", "archive_errors", "archive_limited_count", "processing_status",
+        "archive_extraction_status", "archive_errors", "archive_limited_count", "vision_pages_reviewed", "vision_pages_total", "processing_status",
         "processing_updated_at", "processing_error", "upload_progress_id",
     )
     item = {key: record.get(key) for key in public_fields if key in record}
@@ -4143,14 +4224,20 @@ class NameSearcherPlugin(Star):
             handle.write(data)
         return {"ok": True, "received": current + len(data)}, 200
 
-    def import_staged(self, upload_id: str, label: str = "") -> tuple[dict[str, Any], int]:
+    def import_staged(self, upload_id: str, label: str = "", sha256: str = "") -> tuple[dict[str, Any], int]:
         if not _IMPORT_ID.match(upload_id):
             return {"ok": False, "message": "upload_id 无效"}, 400
         part = self._import_staging() / f"{upload_id}.part"
         if not part.exists():
             return {"ok": False, "message": "没有找到已上传的识别包"}, 404
         try:
+            try:
+                digest = _verify_bundle_sha256(part, sha256)
+            except ValueError as exc:
+                return {"ok": False, "message": str(exc), "sha256_verified": False}, 422
             summary = _import_bundle(self.store, part, {**self.config, "_label": label})
+            summary["sha256"] = digest
+            summary["sha256_verified"] = True
         except ValueError as exc:
             return {"ok": False, "message": str(exc)}, 400
         finally:
@@ -4164,10 +4251,15 @@ class NameSearcherPlugin(Star):
         results: list[dict[str, Any]] = []
         for bundle in sorted(inbox.glob("*.zip")):
             try:
+                sidecar = _sha256_sidecar(bundle)
+                if sidecar is None:
+                    raise ValueError(f"缺少 SHA256 识别码文件：请把 {bundle.name}.sha256 一起放进 import_inbox")
+                digest = _verify_bundle_sha256(bundle, sidecar.read_text(encoding="utf-8", errors="ignore"))
                 summary = _import_bundle(self.store, bundle, self.config)
                 done.mkdir(exist_ok=True)
                 bundle.replace(done / bundle.name)
-                results.append({"bundle": bundle.name, **summary})
+                sidecar.replace(done / sidecar.name)
+                results.append({"bundle": bundle.name, **summary, "sha256": digest, "sha256_verified": True})
             except ValueError as exc:
                 results.append({"bundle": bundle.name, "ok": False, "message": str(exc)})
         if results:
@@ -4182,7 +4274,10 @@ class NameSearcherPlugin(Star):
     async def _page_import_finish(self) -> Any:
         payload = await _page_request_payload()
         result, status = await asyncio.to_thread(
-            self.import_staged, str(payload.get("upload_id") or ""), str(payload.get("name") or "")
+            self.import_staged,
+            str(payload.get("upload_id") or ""),
+            str(payload.get("name") or ""),
+            str(payload.get("sha256") or ""),
         )
         if status == 200 and _as_bool(self.config.get("import_model_review", True)):
             result["model_review"] = self.queue_model_review(result.get("record_ids") or [])
@@ -4512,7 +4607,7 @@ class NameSearcherPlugin(Star):
         session_id = str(source.get("unified_msg_origin") or source.get("message_id") or "name-searcher")
         existing = str(record.get("ocr_text") or "").strip()
         targets = _parse_vision_targets(self.config)
-        max_pages = max(1, min(12, int(self.config.get("vision_review_max_pages", 4) or 4)))
+        max_pages = _vision_page_limit(self.config.get("vision_review_max_pages", 10))
         results: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="name-searcher-vision-") as temporary_directory:
             review_pages = await asyncio.to_thread(
@@ -4624,9 +4719,24 @@ class NameSearcherPlugin(Star):
                 else:
                     consensus_status = "unavailable"
 
+        pages_reviewed = max((int(item.get("pages_reviewed") or 0) for item in successful), default=0)
+        pages_total = _pdf_page_count(path) if path.suffix.lower() == ".pdf" else 0
+        if pages_total > pages_reviewed > 0:
+            # 超出送审页数的部分不经视觉模型复核，但要保留本地识别结果，保证全文完整可查。
+            rest = _pdf_page_texts(path, pages_reviewed)
+            rest_text = "\n".join(
+                f"[第 {pages_reviewed + offset + 1} 页]\n{text}" for offset, text in enumerate(rest) if text
+            ).strip()
+            note = f"[第 {pages_reviewed + 1}–{pages_total} 页未经视觉模型复核，以下为本地识别结果]"
+            if rest_text:
+                final_text = f"{final_text}\n\n{note}\n{rest_text}"
+            elif existing:
+                final_text = f"{final_text}\n\n{note.replace('以下为本地识别结果', '以下为本地识别全文')}\n{existing}"
         updates = {
             "ocr_text_local": existing[:200000],
             "ocr_text": final_text[:200000],
+            "vision_pages_reviewed": pages_reviewed,
+            "vision_pages_total": pages_total or pages_reviewed,
             "ocr_confidence": max(float(record.get("ocr_confidence") or 0), 0.85),
             "ocr_engine": "vision-consensus" if consensus_status == "completed" else "vision-model",
             "vision_engine": consensus_engine or str(successful[0].get("engine") or ""),

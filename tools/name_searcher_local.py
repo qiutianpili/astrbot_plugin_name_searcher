@@ -236,9 +236,20 @@ def _pack(run: Path, out: Path | None, label: str = "", log=print) -> Path:
         }
         bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, default=ns._json_default))
     size = out.stat().st_size / 1024 / 1024
+    digest, sidecar = _write_sha256(out)
     log(f"已打包 {len(manifest_records)} 个文件 → {out}（{size:.1f} MB）")
-    log("下一步：打开 AstrBot 插件页，点“导入识别包”选择这个文件。")
+    log(f"SHA256 识别码：{digest}")
+    log(f"识别码已保存为 {sidecar.name}。")
+    log("下一步：打开 AstrBot 插件页，点“导入识别包”，把 zip 和 .sha256 一起选上（或按提示粘贴识别码）；服务器先校验 SHA256 再导入。")
     return out
+
+
+def _write_sha256(bundle: Path) -> tuple[str, Path]:
+    """写出 sha256sum 格式的识别码文件：<bundle>.zip.sha256。"""
+    digest = ns._file_sha256(bundle)
+    sidecar = bundle.with_name(bundle.name + ".sha256")
+    sidecar.write_text(f"{digest}  {bundle.name}\n", encoding="utf-8")
+    return digest, sidecar
 
 
 def _status_counts(run: Path | None) -> dict[str, int]:
