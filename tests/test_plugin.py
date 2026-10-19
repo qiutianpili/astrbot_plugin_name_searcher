@@ -1502,6 +1502,28 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertTrue(payload["data_url"].startswith("data:image/png;base64,"))
         self.assertNotIn("path", payload)
 
+    def test_bridge_blob_returns_base64_for_online_viewer(self):
+        import base64 as _b64
+        plugin = make_plugin(self.temp_path)
+        record = plugin.store.add_bytes("名单.csv", "姓名\n张三\n".encode("utf-8"), kind="document", mime="text/csv", source={})
+        payload, status = main._blob_payload(plugin.store, record["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(_b64.b64decode(payload["data_base64"]).decode("utf-8"), "姓名\n张三\n")
+        self.assertEqual(payload["mime"], "text/csv")
+        self.assertNotIn("path", payload)
+        with patch.object(main, "DOC_VIEWER_MAX_BYTES", 3):
+            self.assertEqual(main._blob_payload(plugin.store, record["id"])[1], 413)
+        self.assertEqual(main._blob_payload(plugin.store, "missing")[1], 404)
+        response = asyncio.run(plugin._page_file_blob(record["id"]))
+        self.assertIsNotNone(response)
+
+    def test_panel_has_online_viewer_button(self):
+        for rel in ("pages/name-searcher/index.html", "plugin-page/index.html", "webui/index.html"):
+            html = (Path(main.__file__).parent / rel).read_text(encoding="utf-8")
+            for marker in ('id="onlineViewButton"', "https://20610728.xyz/hark/doc-viewer.html", "doc-viewer:ready", "doc-viewer:file", "window.open(DOC_VIEWER_URL, '_blank')", 'id="viewerDialog"'):
+                self.assertIn(marker, html)
+            self.assertNotIn("noopener', DOC", html)
+
     def test_store_bulk_delete_and_clear_remove_downloaded_files(self):
         plugin = make_plugin(self.temp_path)
         records = [

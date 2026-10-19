@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.4"
+PLUGIN_VERSION = "1.8.5"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -3348,6 +3348,40 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
+DOC_VIEWER_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _blob_payload(store: ArtifactStore, artifact_id: str) -> tuple[dict[str, Any], int]:
+    """Return a captured file as base64 for the online document viewer.
+
+    The AstrBot Plugin Page bridge only carries JSON, so the panel cannot get a
+    Blob from the download route. The size cap keeps one bridge message sane.
+    """
+
+    record = store.get(artifact_id)
+    if not record:
+        return {"error": "文件不存在"}, 404
+    path = store.path_for(record)
+    if not path or not path.exists():
+        return {"error": "文件内容不可用"}, 404
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return {"error": f"读取文件失败：{exc}"}, 500
+    if size > DOC_VIEWER_MAX_BYTES:
+        return {"error": f"文件超过 {DOC_VIEWER_MAX_BYTES // (1024 * 1024)} MB，无法在线预览，请下载后查看"}, 413
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {"error": f"读取文件失败：{exc}"}, 500
+    return {
+        "name": str(record.get("name") or path.name),
+        "mime": str(record.get("mime") or _mime_for(path)),
+        "size": len(raw),
+        "data_base64": base64.b64encode(raw).decode("ascii"),
+    }, 200
+
+
 def _preview_payload(store: ArtifactStore, artifact_id: str) -> tuple[dict[str, Any], int]:
     """Return an iframe-safe image preview without exposing a local path."""
 
@@ -4131,6 +4165,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/files/upload", self._page_upload_files, ["POST"], "Upload local files"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/preview", self._page_file_preview, ["GET"], "Preview image"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/content", self._page_file_content, ["GET"], "Download captured file"),
+            (f"/{PLUGIN_ID}/files/<artifact_id>/blob", self._page_file_blob, ["GET"], "Captured file for the online viewer"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/table", self._page_image_table, ["POST"], "Convert image to table"),
             (f"/{PLUGIN_ID}/import/chunk", self._page_import_chunk, ["POST"], "Upload a recognition bundle chunk"),
             (f"/{PLUGIN_ID}/import/finish", self._page_import_finish, ["POST"], "Import an uploaded recognition bundle"),
@@ -4411,6 +4446,10 @@ class NameSearcherPlugin(Star):
 
     async def _page_file_preview(self, artifact_id: str) -> Any:
         payload, status = _preview_payload(self.store, artifact_id)
+        return _page_json_response(payload, status)
+
+    async def _page_file_blob(self, artifact_id: str) -> Any:
+        payload, status = await asyncio.to_thread(_blob_payload, self.store, artifact_id)
         return _page_json_response(payload, status)
 
     async def _page_file_content(self, artifact_id: str) -> Any:

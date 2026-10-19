@@ -185,7 +185,10 @@
     .details { display: grid; grid-template-columns: minmax(100px, .4fr) minmax(0, 1fr); gap: 10px 20px; margin-top: 18px; }
     .details dt { font-size: 12px; color: var(--text-secondary); }
     .details dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; white-space: pre-line; }
-    .modal-foot { display: flex; justify-content: flex-end; padding: 14px 22px 20px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; padding: 14px 22px 20px; }
+    #viewerDialog { width: min(1200px, calc(100vw - 24px)); max-width: none; }
+    .viewer-body { padding: 0 14px 14px; }
+    .viewer-body iframe { display: block; width: 100%; height: min(78vh, 900px); border: 0; border-radius: var(--r-m); background: var(--fill-tertiary); }
 
     .toast { position: fixed; left: 50%; bottom: 24px; z-index: 5; max-width: calc(100vw - 32px); padding: 11px 18px; border-radius: var(--r-pill); background: var(--fill-primary); color: var(--fill-on); font: 500 13px/1.3 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 12px); transition: opacity .2s var(--ease-out), transform .2s var(--ease-out); }
     .toast.show { opacity: 1; transform: translate(-50%, 0); }
@@ -216,7 +219,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.4</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.5</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -313,7 +316,11 @@
   <dialog id="previewDialog" aria-labelledby="previewTitle">
     <div class="modal-head"><div><h2 id="previewTitle" class="modal-title">文件预览</h2><p id="previewSubtitle" class="modal-subtitle"></p></div><button id="closePreviewButton" class="icon-button" type="button" title="关闭预览" aria-label="关闭预览">×</button></div>
     <div class="modal-body"><div id="previewFrame" class="preview-frame"></div><dl id="previewDetails" class="details"></dl></div>
-    <div class="modal-foot"><a id="downloadLink" class="button primary" href="#" target="_blank" rel="noopener">下载文件</a></div>
+    <div class="modal-foot"><button id="onlineViewButton" class="button" type="button" title="在 20610728.xyz 在线文档查看器中打开，文件只在浏览器本地解析" hidden>在线预览</button><a id="downloadLink" class="button primary" href="#" target="_blank" rel="noopener">下载文件</a></div>
+  </dialog>
+  <dialog id="viewerDialog" aria-labelledby="viewerTitle">
+    <div class="modal-head"><div><h2 id="viewerTitle" class="modal-title">在线预览</h2><p id="viewerSubtitle" class="modal-subtitle">文件只在浏览器本地解析</p></div><button id="closeViewerButton" class="icon-button" type="button" title="关闭在线预览" aria-label="关闭在线预览">×</button></div>
+    <div id="viewerBody" class="viewer-body"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
@@ -452,13 +459,58 @@
         updateStats();
       }
       function findFile(id) { return state.files.find(file => fileId(file) === id); }
+      const DOC_VIEWER_URL = 'https://20610728.xyz/hark/doc-viewer.html';
+      const DOC_VIEWER_ORIGIN = 'https://20610728.xyz';
+      const DOC_VIEWER_EXTS = new Set(['xlsx', 'xls', 'xlsm', 'xlsb', 'ods', 'csv', 'tsv', 'docx', 'docm', 'dotx', 'pdf', 'txt', 'md', 'json', 'xml', 'log', 'ini', 'yaml', 'yml']);
+      const fileExt = file => { const match = /\.([a-z0-9]+)$/i.exec(fileName(file)); return (match ? match[1] : text(file.format, '')).toLowerCase(); };
+      const inlinePreviewed = file => isImage(file) || (!!fileUrl(file) && /application\/pdf|\.pdf$/i.test(`${file.mime_type || ''} ${fileName(file)}`));
+      // Inside AstrBot the panel iframe has no allow-popups, so the viewer falls back to a frame in the panel; Chrome blocks PDFs in sandboxed frames.
+      const canViewOnline = file => !!file && !!file.id && file.download_status !== 'unavailable' && DOC_VIEWER_EXTS.has(fileExt(file)) && !inlinePreviewed(file) && !(useBridge && fileExt(file) === 'pdf');
+      let previewFile = null;
+      async function loadFileData(file) {
+        if (useBridge) {
+          const result = await request(`/files/${encodeURIComponent(file.id)}/blob`);
+          if (!result || !result.data_base64) throw new Error((result && (result.error || result.message)) || '没有拿到文件内容');
+          const binary = atob(result.data_base64); const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          return { name: result.name || fileName(file), mime: result.mime || file.mime_type || file.mime || '', data: bytes.buffer };
+        }
+        const url = fileUrl(file); if (!url) throw new Error('文件内容不可用');
+        const response = await fetch(url, { credentials: 'same-origin' }); if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return { name: fileName(file), mime: file.mime_type || file.mime || response.headers.get('content-type') || '', data: await response.arrayBuffer() };
+      }
+      function deliverToViewer(target, origin, dataPromise, waitReady) {
+        let ready = !waitReady; let payload = null; let done = false;
+        const send = () => { if (done || !ready || !payload) return; done = true; window.removeEventListener('message', onMessage); try { target.postMessage({ type: 'doc-viewer:file', name: payload.name, mime: payload.mime, data: payload.data }, origin, [payload.data]); } catch (error) { showError(`无法把文件交给在线预览：${error.message}`); } };
+        const onMessage = event => { if (event.source === target && (origin === '*' || event.origin === origin) && event.data && event.data.type === 'doc-viewer:ready') { ready = true; send(); } };
+        window.addEventListener('message', onMessage); window.setTimeout(() => window.removeEventListener('message', onMessage), 120000);
+        dataPromise.then(result => { payload = result; send(); }).catch(error => { done = true; window.removeEventListener('message', onMessage); showError(`在线预览失败：${error.message}`); });
+        return { markReady() { ready = true; send(); } };
+      }
+      function openOnlineViewer() {
+        const file = previewFile; if (!canViewOnline(file)) return;
+        let popup = null;
+        try { popup = window.open(DOC_VIEWER_URL, '_blank'); } catch (_) { popup = null; }
+        const dataPromise = loadFileData(file);
+        if (popup) { deliverToViewer(popup, DOC_VIEWER_ORIGIN, dataPromise, true); toast('已在新标签页打开在线预览'); return; }
+        const dialog = document.getElementById('viewerDialog'); const body = document.getElementById('viewerBody');
+        document.getElementById('viewerTitle').textContent = `在线预览 · ${fileName(file)}`;
+        body.innerHTML = ''; const frame = document.createElement('iframe'); frame.title = `在线预览 ${fileName(file)}`; frame.referrerPolicy = 'no-referrer';
+        let link = null; frame.addEventListener('load', () => { if (link) link.markReady(); });
+        frame.src = DOC_VIEWER_URL; body.appendChild(frame);
+        // The nested frame inherits the panel's sandbox, so its origin is opaque and only "*" reaches it.
+        link = deliverToViewer(frame.contentWindow, '*', dataPromise, true);
+        if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
+      }
+      function closeOnlineViewer() { const dialog = document.getElementById('viewerDialog'); if (typeof dialog.close === 'function') dialog.close(); else dialog.removeAttribute('open'); document.getElementById('viewerBody').innerHTML = ''; }
       async function showPreview(file) {
-        if (!file) return; const image = isImage(file); let url = fileUrl(file); els.title.textContent = fileName(file); els.subtitle.textContent = `${typeName(file)} · ${formatSize(file.size || file.bytes || file.file_size)}`;
+        if (!file) return; previewFile = file; const image = isImage(file); let url = fileUrl(file); els.title.textContent = fileName(file); els.subtitle.textContent = `${typeName(file)} · ${formatSize(file.size || file.bytes || file.file_size)}`;
         if (useBridge && image && !url && file.id) {
           try { const preview = await request(`/files/${encodeURIComponent(file.id)}/preview`); url = preview && (preview.data_url || preview.url) || ''; if (url) file.preview_data_url = url; } catch (error) { showError(`无法加载图片预览：${error.message}`); }
         }
         els.download.href = url || '#'; els.download.style.display = (url || (useBridge && file.id && file.download_status !== 'unavailable')) ? 'inline-flex' : 'none'; els.download.dataset.id = file.id || ''; els.download.dataset.name = fileName(file);
-        els.frame.innerHTML = image && url ? `<img src="${escape(url)}" alt="${escape(fileName(file))}">` : (!image && url && /application\/pdf|\.pdf$/i.test(`${file.mime_type || ''} ${fileName(file)}`) ? `<iframe src="${escape(url)}" title="${escape(fileName(file))}"></iframe>` : `<div class="preview-placeholder">此文件类型暂不支持内嵌预览，请使用“下载文件”。</div>`);
+        els.frame.innerHTML = image && url ? `<img src="${escape(url)}" alt="${escape(fileName(file))}">` : (!image && url && /application\/pdf|\.pdf$/i.test(`${file.mime_type || ''} ${fileName(file)}`) ? `<iframe src="${escape(url)}" title="${escape(fileName(file))}"></iframe>` : `<div class="preview-placeholder">${canViewOnline(file) ? '此文件类型暂不支持内嵌预览，可以用“在线预览”或“下载文件”。' : '此文件类型暂不支持内嵌预览，请使用“下载文件”。'}</div>`);
+        document.getElementById('onlineViewButton').hidden = !canViewOnline(file);
         const confidence = Number(file.ocr_confidence); const clarity = Number(file.image_clarity);
         const encoding = file.encoding_issue ? `${text(file.source_encoding, '未知编码')} -> UTF-8` : text(file.source_encoding, '无需转码'); const sheets = Number(file.sheet_count) > 0 ? `${file.sheet_count}（${Array.isArray(file.sheet_names) ? file.sheet_names.join('、') : ''}）` : '-';
         const archiveSource = file.source && file.source.archive_member ? `${text(file.source.archive_name)} / ${text(file.source.archive_member)}` : '-';
@@ -663,6 +715,9 @@
       els.list.addEventListener('click', event => { if (event.target.closest('[data-collapse]')) { state.expanded = !state.expanded; render(); return; } const preview = event.target.closest('[data-preview]'); const remove = event.target.closest('[data-delete]'); if (preview) showPreview(findFile(preview.dataset.preview)); if (remove) removeFiles([remove.dataset.delete]); });
       els.list.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const card = event.target.closest('.file-card'); if (card && event.target === card) { event.preventDefault(); showPreview(findFile(card.dataset.id)); } });
       document.getElementById('closePreviewButton').addEventListener('click', closePreview); els.dialog.addEventListener('click', event => { if (event.target === els.dialog) closePreview(); });
+      document.getElementById('onlineViewButton').addEventListener('click', openOnlineViewer);
+      document.getElementById('closeViewerButton').addEventListener('click', closeOnlineViewer);
+      document.getElementById('viewerDialog').addEventListener('close', () => { document.getElementById('viewerBody').innerHTML = ''; });
       els.download.addEventListener('click', async event => {
         if (!useBridge) return;
         event.preventDefault();

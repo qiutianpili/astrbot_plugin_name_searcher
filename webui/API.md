@@ -150,3 +150,7 @@ Plugin Page 本地批量上传接口。为兼容 AstrBot Page bridge，请求使
 | POST | `/import/scan` | 导入存储目录 `import_inbox/*.zip`（每个包须有同名 `.zip.sha256`），完成后连同识别码文件移到 `import_inbox/done/`。 |
 
 识别包是 zip：`manifest.json`（`format: "name-searcher-bundle"`, `version: 1`, `records: [...]`，每条记录带 `bundle_file` 与 `sha256`）+ `files/` 下的原文件。
+
+### GET /files/<id>/blob（插件页 bridge）
+
+返回 `{name, mime, size, data_base64}`，供在线文档查看器使用；文件超过 20 MB 返回 413，不存在返回 404。

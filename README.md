@@ -85,6 +85,12 @@ PATCH /config
 
 查找视觉模型输出时会兼容 Markdown 包裹、HTML 实体、零宽字符、全半角差异、姓名间标点和 `\\uXXXX` 转义文本。上述处理只生成搜索键，面板及索引中仍保留模型原始输出，便于核对。
 
+## 1.8.5 更新
+
+- 文件详情里，表格（xlsx/xls/xlsm/xlsb/ods/csv/tsv）、Word（docx/docm/dotx）、PDF、文本（txt/md/json/xml/log/ini/yaml）等无法内嵌预览的文件，在“下载文件”旁新增“在线预览”，用 https://20610728.xyz/hark/doc-viewer.html 查看，文件通过 postMessage 交给查看器、只在浏览器本地解析，不生成公开链接。
+- 旧版面板（独立网页）会在新标签页打开查看器；AstrBot 插件页的 iframe 不允许弹窗，改为在面板内的预览窗口里打开（这种情况下 PDF 会被浏览器拦截，所以 PDF 不显示该按钮，请下载查看）。
+- 新增插件页接口 `GET /files/<id>/blob`（base64，单文件上限 20 MB）。
+
 ## 1.8.4 更新
 
 - 本地识别工具导入的文件，经视觉模型识别后状态显示“本地识别工具+LLMs识别”，再经 LLM 审核后显示“本地识别工具+LLMs识别&审核”；排队/补跑中显示“等待LLMs识别 / LLMs识别中”。
