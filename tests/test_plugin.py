@@ -224,6 +224,9 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertIn(".eyebrow.online::before", html)
         self.assertIn("@keyframes breathe", html)
         self.assertIn('id="heroEyebrow"', html)
+        for marker in ("本地识别工具+LLMs识别&审核", "本地识别工具+LLMs识别'", 'id="nameSortButton"', "nameCollator"):
+            self.assertIn(marker, html)
+        self.assertIn("model_review_status", main._public_record({"id": "x", "model_review_status": "queued"}))
 
     def test_archive_without_limits_has_no_notice(self):
         buffer = io.BytesIO()

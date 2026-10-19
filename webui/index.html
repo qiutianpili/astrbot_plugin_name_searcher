@@ -106,6 +106,11 @@
 
     .list-head, .file-card { display: grid; grid-template-columns: 30px minmax(220px, 1.8fr) minmax(80px, .6fr) minmax(90px, .6fr) minmax(140px, .9fr) 76px; gap: 14px; align-items: center; padding: 0 20px; }
     .list-head { padding-top: 12px; padding-bottom: 10px; font: 500 12px/1.3 var(--sans); color: var(--text-secondary); }
+    .sort-button { justify-self: start; display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; margin-left: -6px; border: 0; border-radius: 6px; background: none; font: inherit; color: inherit; cursor: pointer; }
+    .sort-button:hover, .sort-button:focus-visible { color: var(--text); background: var(--orange-soft); outline: none; }
+    .sort-button[data-sort="asc"], .sort-button[data-sort="desc"] { color: var(--text); }
+    .sort-arrow { font-size: 11px; opacity: .55; }
+    .sort-button[data-sort="asc"] .sort-arrow, .sort-button[data-sort="desc"] .sort-arrow { opacity: 1; color: var(--orange); }
     .file-list { padding: 0 8px 8px; }
     .file-card { min-height: 72px; padding: 10px 12px; border-radius: var(--r-s); transition: background var(--dur) var(--ease-out); }
     .file-card:hover { background: var(--wash); }
@@ -211,7 +216,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.3</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.4</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -246,7 +251,7 @@
         <span id="toolbarNote" class="toolbar-note">-</span>
       </div>
       <div id="errorBox" class="error" hidden></div>
-      <div class="list-head" aria-hidden="true"><span></span><span>文件</span><span>类型</span><span>大小</span><span>来源 / 捕获时间</span><span></span></div>
+      <div class="list-head"><span></span><button id="nameSortButton" class="sort-button" type="button" data-sort="" title="按文件名排序" aria-label="按文件名排序，当前默认顺序">文件 <span class="sort-arrow" aria-hidden="true">↕</span></button><span>类型</span><span>大小</span><span>来源 / 捕获时间</span><span></span></div>
       <div id="fileList" class="file-list"><div class="loading">正在读取文件…</div></div>
     </section>
 
@@ -327,7 +332,8 @@
       const bridge = window.AstrBotPluginPage || null;
       const useBridge = !!(bridge && typeof bridge.ready === 'function' && typeof bridge.apiGet === 'function' && typeof bridge.apiPost === 'function');
       const bridgeReady = useBridge ? bridge.ready() : Promise.resolve(null);
-      const state = { files: [], filtered: [], selected: new Set(), config: {}, expanded: false, latest: new Set() };
+      const state = { files: [], filtered: [], selected: new Set(), config: {}, expanded: false, latest: new Set(), sort: (() => { try { const v = localStorage.getItem('ns-name-sort'); return v === 'asc' || v === 'desc' ? v : ''; } catch (_) { return ''; } })() };
+      const nameCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
       const COLLAPSE_AT = 5;
       const isLocal = file => (file.source || {}).upload_source === 'local-tool';
       const isUpload = file => { const src = file.source || {}; return src.upload_source === 'plugin-page' || String(src.unified_msg_origin || '').startsWith('plugin-page'); };
@@ -364,7 +370,8 @@
       const archiveErrors = file => Array.isArray(file.archive_errors) ? file.archive_errors.map(String).filter(item => !item.startsWith('共 ')) : [];
       const archiveLimited = file => file.archive_extraction_status === 'partial' || archiveErrors(file).length > 0;
       const archiveStatusName = file => { const s = file.archive_extraction_status; if (!s) return '-'; const n = Number(file.archive_limited_count) || archiveErrors(file).filter(item => /未识别|未展开/.test(item)).length; if (archiveLimited(file) && s !== 'failed') return n ? `部分解压（${n} 个成员未识别）` : '部分解压'; return {extracted: '已解压', failed: '解压失败', empty: '空压缩包'}[s] || s; };
-      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? (archiveLimited(file) ? '部分解压' : '仅保存') : '已捕获';
+      const localModelStatus = file => { if (!isLocal(file) || file.extraction_status === 'failed') return ''; if (file.model_review_status === 'running') return '本地识别工具 · LLMs识别中'; if (file.model_review_status === 'queued') return '本地识别工具 · 等待LLMs识别'; const vision = file.vision_status === 'extracted'; const review = file.llm_review_status === 'completed'; return vision && review ? '本地识别工具+LLMs识别&审核' : vision ? '本地识别工具+LLMs识别' : review ? '本地识别工具+LLMs审核' : ''; };
+      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : localModelStatus(file) ? localModelStatus(file) : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? (archiveLimited(file) ? '部分解压' : '仅保存') : '已捕获';
       const setConnection = online => { els.dot.className = `status-dot ${online ? 'online' : 'offline'}`; const eyebrow = document.getElementById('heroEyebrow'); if (eyebrow) { eyebrow.classList.toggle('online', online); eyebrow.classList.toggle('offline', !online); } els.connection.textContent = online ? '服务已连接' : '服务不可用'; };
       const showError = message => { els.error.textContent = message; els.error.hidden = !message; };
       let toastTimer;
@@ -430,6 +437,9 @@
           const sourceMatch = sourceWanted === 'all' || (sourceWanted === 'upload' ? isUpload(file) : sourceWanted === 'local' ? isLocal(file) : sourceWanted === 'chat' ? !isUpload(file) && !isLocal(file) : state.latest.has(fileId(file)) || state.latest.has(`name:${fileName(file)}`));
           const textMatch = !query || [fileName(file), typeName(file), statusName(file), source(file), text(file.format), text(file.mime_type || file.mime), text(file.ocr_excerpt)].join(' ').toLowerCase().includes(query);
           return statusMatch && typeMatch && sourceMatch && textMatch; });
+        if (state.sort) { const dir = state.sort === 'desc' ? -1 : 1; state.filtered = [...state.filtered].sort((a, b) => dir * nameCollator.compare(fileName(a), fileName(b))); }
+        const sortButton = document.getElementById('nameSortButton');
+        if (sortButton) { sortButton.dataset.sort = state.sort; sortButton.querySelector('.sort-arrow').textContent = state.sort === 'asc' ? '↑' : state.sort === 'desc' ? '↓' : '↕'; sortButton.setAttribute('aria-label', `按文件名排序，当前${state.sort === 'asc' ? '升序' : state.sort === 'desc' ? '降序' : '默认顺序'}`); sortButton.title = state.sort === 'asc' ? '文件名升序（点一下改降序）' : state.sort === 'desc' ? '文件名降序（点一下恢复默认）' : '按文件名排序'; }
         els.note.textContent = `${state.filtered.length} / ${state.files.length} 个文件`;
         if (!state.filtered.length) { els.list.innerHTML = `<div class="empty"><strong>${state.files.length ? '没有匹配的文件' : '还没有捕获文件'}</strong><p>${state.files.length ? '换个关键词或筛选条件试试。' : '当聊天中出现附件时，它们会出现在这里。'}</p></div>`; updateStats(); return; }
         const hidden = state.expanded ? 0 : Math.max(0, state.filtered.length - COLLAPSE_AT);
@@ -587,6 +597,7 @@
       document.getElementById('deleteSelectedButton').addEventListener('click', () => removeFiles([...state.selected]));
       document.getElementById('clearAllButton').addEventListener('click', clearAll);
       document.getElementById('clearFailedButton').addEventListener('click', clearFailed);
+      document.getElementById('nameSortButton').addEventListener('click', () => { state.sort = state.sort === '' ? 'asc' : state.sort === 'asc' ? 'desc' : ''; try { localStorage.setItem('ns-name-sort', state.sort); } catch (_) {} render(); });
       document.getElementById('saveConfigButton').addEventListener('click', saveConfig);
       els.uploadButton.addEventListener('click', () => els.uploadInput.click());
       const bundleInput = document.getElementById('bundleInput'); const bundleButton = document.getElementById('bundleButton');

@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.3"
+PLUGIN_VERSION = "1.8.4"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -3334,7 +3334,7 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "download_status", "reason", "extraction_status", "extraction_error",
         "review_status", "ocr_confidence", "ocr_engine", "image_clarity",
         "image_width", "image_height", "vision_status",
-        "vision_models_completed", "vision_consensus_status", "llm_review_status",
+        "vision_models_completed", "vision_consensus_status", "llm_review_status", "model_review_status",
         "encoding_issue", "encoding_status", "source_encoding", "target_encoding",
         "encoding_repair", "sheet_count", "sheet_names", "archive_member_count",
         "archive_extraction_status", "archive_errors", "archive_limited_count", "vision_pages_reviewed", "vision_pages_total", "processing_status",
