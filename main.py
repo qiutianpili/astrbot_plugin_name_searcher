@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.8.1"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -196,6 +196,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "capture_interval_seconds": 30,
     "capture_progress_notify": True,
     "notify_encoding_issues": True,
+    "notify_archive_limits": True,
     "archive_extraction_enabled": True,
     "archive_max_depth": 3,
     "archive_max_members": 300,
@@ -449,6 +450,7 @@ class ArchiveExpansion:
     members: list[tuple[str, bytes]]
     errors: list[str]
     skipped: int = 0
+    depth_limited: int = 0
 
 
 class PanelUploadEvent:
@@ -828,6 +830,11 @@ def _import_bundle(store: "ArtifactStore", bundle_path: Path, config: Mapping[st
             _repair_record_names(adopted)
             record, outcome = store.import_record(adopted, content)
             summary[outcome] += 1
+            if isinstance(fields.get("archive_errors"), list) and fields.get("archive_errors"):
+                summary.setdefault("archive_limits", []).append({
+                    "name": str(record.get("name") or label),
+                    "count": _archive_limited_count(fields.get("archive_errors")),
+                })
             old_id = str(fields.get("id") or "")
             if old_id:
                 id_map[old_id] = str(record.get("id"))
@@ -2196,15 +2203,16 @@ def _archive_reader_members(
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as archive:
                 for info in archive.infolist():
-                    if len(members) >= max_members:
-                        skipped += 1
+                    if info.is_dir():
                         continue
                     member_name = _zip_member_name(info)
+                    if len(members) >= max_members:
+                        skipped += 1
+                        errors.append(f"超出成员个数上限（{max_members} 个），未识别：{member_name}")
+                        continue
                     safe = _safe_archive_member(member_name)
                     if safe is None:
                         errors.append(f"跳过不安全路径：{member_name}")
-                        continue
-                    if info.is_dir():
                         continue
                     # Unix mode 0o120000 marks symlinks in ZIP metadata.
                     if ((info.external_attr >> 16) & 0o170000) == 0o120000:
@@ -2212,7 +2220,7 @@ def _archive_reader_members(
                         continue
                     if info.file_size < 0 or info.file_size > max_total - declared_total:
                         skipped += 1
-                        errors.append(f"跳过超出解压大小限制：{safe}")
+                        errors.append(f"超出解压总大小上限，未识别：{safe}")
                         continue
                     try:
                         payload = archive.read(info)
@@ -2241,9 +2249,16 @@ def _archive_reader_members(
                         size = int(getattr(info, "uncompressed", 0) or 0)
                         if is_directory:
                             continue
-                        if safe is None or len(allowed) >= max_members or size < 0 or size > max_total - declared_total:
+                        if safe is None:
+                            errors.append(f"跳过不安全路径：{member_name}")
+                            continue
+                        if len(allowed) >= max_members:
                             skipped += 1
-                            errors.append(f"跳过不安全或超限成员：{member_name}")
+                            errors.append(f"超出成员个数上限（{max_members} 个），未识别：{member_name}")
+                            continue
+                        if size < 0 or size > max_total - declared_total:
+                            skipped += 1
+                            errors.append(f"超出解压总大小上限，未识别：{member_name}")
                             continue
                         declared_total += size
                         allowed.append(member_name)
@@ -2275,8 +2290,11 @@ def _archive_reader_members(
                 source.write_bytes(content)
                 with rarfile.RarFile(source) as archive:
                     for info in archive.infolist():
+                        if info.isdir():
+                            continue
                         if len(members) >= max_members:
                             skipped += 1
+                            errors.append(f"超出成员个数上限（{max_members} 个），未识别：{info.filename}")
                             continue
                         safe = _safe_archive_member(info.filename)
                         if safe is None or info.isdir():
@@ -2286,7 +2304,7 @@ def _archive_reader_members(
                         size = int(getattr(info, "file_size", 0) or 0)
                         if size < 0 or size > max_total - declared_total:
                             skipped += 1
-                            errors.append(f"跳过超出解压大小限制：{safe}")
+                            errors.append(f"超出解压总大小上限，未识别：{safe}")
                             continue
                         try:
                             payload = archive.read(info)
@@ -2304,8 +2322,11 @@ def _archive_reader_members(
         try:
             with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
                 for info in archive.getmembers():
+                    if not info.isfile():
+                        continue
                     if len(members) >= max_members:
                         skipped += 1
+                        errors.append(f"超出成员个数上限（{max_members} 个），未识别：{info.name}")
                         continue
                     safe = _safe_archive_member(info.name)
                     if safe is None:
@@ -2315,7 +2336,7 @@ def _archive_reader_members(
                         continue
                     if info.size < 0 or info.size > max_total - declared_total:
                         skipped += 1
-                        errors.append(f"跳过超出解压大小限制：{safe}")
+                        errors.append(f"超出解压总大小上限，未识别：{safe}")
                         continue
                     try:
                         handle = archive.extractfile(info)
@@ -2323,6 +2344,7 @@ def _archive_reader_members(
                             payload = handle.read(max_total - declared_total + 1)
                             if len(payload) > max_total - declared_total:
                                 skipped += 1
+                                errors.append(f"超出解压总大小上限，未识别：{safe}")
                                 continue
                             declared_total += len(payload)
                             members.append((safe, payload))
@@ -2338,7 +2360,7 @@ def _archive_reader_members(
                 payload = stream.read(max_total + 1)
             if len(payload) > max_total:
                 skipped += 1
-                errors.append(f"跳过超出解压大小限制：{name}")
+                errors.append(f"超出解压总大小上限，未识别：{name}")
             else:
                 members.append((Path(name).stem or "解压文件", payload))
         except Exception as exc:
@@ -2359,33 +2381,45 @@ def _expand_archive_bytes(
         return ArchiveExpansion([], [])
     max_depth, max_members, max_total = _archive_limits(config)
     if depth >= max_depth:
-        return ArchiveExpansion([], [f"达到嵌套深度上限：{name}"])
+        return ArchiveExpansion([], [f"超出嵌套层数上限（{max_depth} 层），未展开：{name}"], 0, 1)
     pending = _archive_reader_members(name, content, max_members, max_total)
     output: list[tuple[str, bytes]] = []
     errors = list(pending[1])
     total = 0
     skipped = pending[2]
+    depth_limited = 0
     for member_name, payload in pending[0]:
         if len(output) >= max_members:
             skipped += 1
+            errors.append(f"超出成员个数上限（{max_members} 个），未识别：{member_name}")
             continue
         if len(payload) > max_total - total:
             skipped += 1
-            errors.append(f"跳过超出解压大小限制：{member_name}")
+            errors.append(f"超出解压总大小上限，未识别：{member_name}")
             continue
         total += len(payload)
         output.append((member_name, payload))
-        if _kind_for(member_name, "") == "archive" and depth + 1 < max_depth:
+        if _kind_for(member_name, "") == "archive":
+            if depth + 1 >= max_depth:
+                depth_limited += 1
+                errors.append(f"超出嵌套层数上限（{max_depth} 层），未展开：{member_name}")
+                continue
             nested = _expand_archive_bytes(member_name, payload, config, depth=depth + 1)
-            errors.extend(nested.errors)
+            errors.extend(f"{member_name}/{item}" if "：" not in item else item.replace("：", f"：{member_name}/", 1) for item in nested.errors)
             skipped += nested.skipped
+            depth_limited += nested.depth_limited
             for nested_name, nested_payload in nested.members:
-                if len(output) >= max_members or len(nested_payload) > max_total - total:
+                if len(output) >= max_members:
                     skipped += 1
+                    errors.append(f"超出成员个数上限（{max_members} 个），未识别：{member_name}/{nested_name}")
+                    continue
+                if len(nested_payload) > max_total - total:
+                    skipped += 1
+                    errors.append(f"超出解压总大小上限，未识别：{member_name}/{nested_name}")
                     continue
                 total += len(nested_payload)
                 output.append((f"{member_name}/{nested_name}", nested_payload))
-    return ArchiveExpansion(output, errors, skipped)
+    return ArchiveExpansion(output, errors, skipped, depth_limited)
 
 
 def _archive_candidates(
@@ -2413,9 +2447,11 @@ def _archive_candidates(
             source=source,
             type_hint="archive-member",
         ))
-    if expansion.skipped:
-        expansion.errors.append(f"跳过 {expansion.skipped} 个超出归档限制的成员")
-    return candidates, expansion.errors
+    limited = expansion.skipped + expansion.depth_limited
+    errors = list(expansion.errors)
+    if limited:
+        errors.insert(0, f"共 {limited} 个成员超出层数、个数或大小上限，未识别")
+    return candidates, errors
 
 
 def _panel_upload_candidates(
@@ -3124,6 +3160,36 @@ def _review_notice(record: Mapping[str, Any]) -> str:
     return f"文件“{record.get('name')}”识别置信度较低，LLM 审核暂不可用。请重新发送更清晰或可解析的原文件。"
 
 
+def _archive_limited_count(errors: Iterable[str]) -> int:
+    errors = list(errors or [])
+    if errors:
+        match = re.match(r"^共 (\d+) 个成员", str(errors[0]))
+        if match:
+            return int(match.group(1))
+    return sum(1 for item in errors if "未识别" in str(item) or "未展开" in str(item))
+
+
+def _archive_notice(records: Iterable[Mapping[str, Any]], limit: int = 5) -> str:
+    """Tell the user which archive members were not recognised and why."""
+
+    lines: list[str] = []
+    for record in records:
+        errors = record.get("archive_errors") if isinstance(record.get("archive_errors"), list) else []
+        if not errors:
+            continue
+        details = [str(item) for item in errors if not str(item).startswith("共 ")]
+        count = max(_archive_limited_count(errors), sum(1 for item in details if "未识别" in item or "未展开" in item))
+        title = record.get("name") or "未命名压缩包"
+        lines.append(f"压缩包「{title}」有 {count} 个成员未识别：" if count else f"压缩包「{title}」有内容未能解压：")
+        lines.extend(f"- {item}" for item in details[:limit])
+        if len(details) > limit:
+            lines.append(f"- ……另有 {len(details) - limit} 条，详见插件页文件详情")
+    if not lines:
+        return ""
+    lines.append("可在插件配置调高“压缩包嵌套深度 / 成员数 / 解压总大小”上限，或先解压后再发送。")
+    return "\n".join(lines)
+
+
 def _encoding_notice(records: Iterable[Mapping[str, Any]]) -> str:
     affected = [record for record in records if _as_bool(record.get("encoding_issue", False))]
     if not affected:
@@ -3190,7 +3256,7 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "vision_models_completed", "vision_consensus_status", "llm_review_status",
         "encoding_issue", "encoding_status", "source_encoding", "target_encoding",
         "encoding_repair", "sheet_count", "sheet_names", "archive_member_count",
-        "archive_extraction_status", "archive_errors", "processing_status",
+        "archive_extraction_status", "archive_errors", "archive_limited_count", "processing_status",
         "processing_updated_at", "processing_error", "upload_progress_id",
     )
     item = {key: record.get(key) for key in public_fields if key in record}
@@ -4945,10 +5011,14 @@ class NameSearcherPlugin(Star):
                         )
                         archive_updates = {
                             "archive_member_count": len(archive_children),
-                            "archive_extraction_status": "extracted" if archive_children else ("failed" if archive_errors else "empty"),
+                            "archive_extraction_status": (
+                                ("partial" if archive_errors else "extracted")
+                                if archive_children
+                                else ("failed" if archive_errors else "empty")
+                            ),
+                            "archive_errors": archive_errors[:50],
+                            "archive_limited_count": _archive_limited_count(archive_errors),
                         }
-                        if archive_errors:
-                            archive_updates["archive_errors"] = archive_errors[:50]
                         self.store.update(record["id"], **archive_updates)
                         record.update(archive_updates)
                         if pending_archive_children:
@@ -5006,6 +5076,10 @@ class NameSearcherPlugin(Star):
             )
             if self.config.get("request_review_on_low_confidence", True) and needs_review:
                 await _send(event, _review_notice(record))
+        if _as_bool(self.config.get("notify_archive_limits", True)):
+            notice = _archive_notice(records)
+            if notice:
+                await _send(event, notice)
         if _as_bool(self.config.get("notify_encoding_issues", True)):
             notice = _encoding_notice(records)
             if notice:

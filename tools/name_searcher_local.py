@@ -19,6 +19,8 @@
     --lang LANG       Tesseract 语言（默认 chi_sim+eng；RapidOCR 不受影响）
     --max-mb N        单文件大小上限（默认 200 MB）
     --no-archives     不展开压缩包
+    --archive-max-depth N / --archive-max-members N / --archive-max-size-mb N
+                      压缩包展开上限（默认 3 层 / 300 个 / 200 MB）；超出的成员会在日志里列出
 """
 
 from __future__ import annotations
@@ -86,7 +88,11 @@ def _plugin(run: Path, args: argparse.Namespace) -> "ns.NameSearcherPlugin":
         "capture_progress_notify": False,
         "request_review_on_low_confidence": False,
         "notify_encoding_issues": False,
+        "notify_archive_limits": False,
         "archive_extraction_enabled": not args.no_archives,
+        "archive_max_depth": int(getattr(args, "archive_max_depth", 3) or 3),
+        "archive_max_members": int(getattr(args, "archive_max_members", 300) or 300),
+        "archive_max_total_size_mb": float(getattr(args, "archive_max_size_mb", 200) or 200),
         "capture_window_enabled": False,
         "min_free_memory_mb": 0,
     }
@@ -142,6 +148,7 @@ async def _scan(inputs, run: Path, args: argparse.Namespace, log=print, progress
     event = ns.PanelUploadEvent()
     started = time.time()
     failed = 0
+    limited = 0
     log(f"共 {len(files)} 个文件，本次识别目录 {run}")
     for index, (path, relative) in enumerate(files, 1):
         if should_stop and should_stop():
@@ -180,13 +187,22 @@ async def _scan(inputs, run: Path, args: argparse.Namespace, log=print, progress
         status = ns._public_record(record).get("extraction_status") if record else "未处理"
         names = {"extracted": "已识别", "no_text": "无文字", "stored_only": "仅保存", "failed": "识别失败", "unavailable": "读取失败"}
         label = names.get(str(status), str(status))
+        if record.get("archive_extraction_status") == "partial":
+            label = "部分解压"
         if status in {"failed", "unavailable"}:
             failed += 1
         extra = f"，含 {len(records) - 1} 个压缩包成员" if len(records) > 1 else ""
         log(f"[{index}/{len(files)}] {label} {relative}（{time.time() - t0:.1f}s{extra}）")
+        notice = ns._archive_notice(records)
+        if notice:
+            limited += 1
+            for line in notice.splitlines()[:-1]:
+                log(f"    ⚠ {line}")
         if progress:
             progress(index, len(files), str(status))
     log(f"完成：{len(files)} 个文件，{failed} 个失败，用时 {time.time() - started:.0f}s")
+    if limited:
+        log(f"注意：{limited} 个压缩包有成员超出层数、个数或大小上限未识别。可先解压再识别，或用命令行参数 --archive-max-depth / --archive-max-members / --archive-max-size-mb 调高上限。")
     return 0
 
 
@@ -252,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lang", default="chi_sim+eng")
     parser.add_argument("--max-mb", type=float, default=200)
     parser.add_argument("--no-archives", action="store_true")
+    parser.add_argument("--archive-max-depth", type=int, default=3, help="压缩包最多展开几层（默认 3，最大 8）")
+    parser.add_argument("--archive-max-members", type=int, default=300, help="每个压缩包最多识别几个成员（默认 300）")
+    parser.add_argument("--archive-max-size-mb", type=float, default=200, help="每个压缩包解压总大小上限 MB（默认 200）")
     args = parser.parse_args(argv)
     work = Path(args.work).expanduser().resolve()
     work.mkdir(parents=True, exist_ok=True)

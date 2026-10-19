@@ -163,6 +163,12 @@
     "hint": "开启后，检测到非 UTF-8 中文编码或修复乱码时，向文件发送者汇总通告具体文件名和源编码。关闭只停止通告，自动转码仍会执行。",
     "default": true
   },
+  "notify_archive_limits": {
+    "description": "通告压缩包未识别成员",
+    "type": "bool",
+    "hint": "开启后，压缩包里有成员因超出嵌套层数、成员个数或解压总大小上限而未识别时，向发送者列出这些成员。",
+    "default": true
+  },
   "capture_window_enabled": {
     "description": "启用定时捕获窗口",
     "type": "bool",

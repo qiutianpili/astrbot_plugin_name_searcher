@@ -175,7 +175,7 @@
     .preview-placeholder { padding: 40px 20px; text-align: center; font-size: 13px; color: var(--text-secondary); }
     .details { display: grid; grid-template-columns: minmax(100px, .4fr) minmax(0, 1fr); gap: 10px 20px; margin-top: 18px; }
     .details dt { font-size: 12px; color: var(--text-secondary); }
-    .details dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+    .details dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; white-space: pre-line; }
     .modal-foot { display: flex; justify-content: flex-end; padding: 14px 22px 20px; }
 
     .toast { position: fixed; left: 50%; bottom: 24px; z-index: 5; max-width: calc(100vw - 32px); padding: 11px 18px; border-radius: var(--r-pill); background: var(--fill-primary); color: var(--fill-on); font: 500 13px/1.3 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 12px); transition: opacity .2s var(--ease-out), transform .2s var(--ease-out); }
@@ -275,6 +275,7 @@
         <div class="config-grid">
           <div class="field"><label for="captureIntervalSeconds">批量捕获窗口（秒）</label><input id="captureIntervalSeconds" type="number" min="0" step="1" placeholder="30"><small class="field-hint">0 表示收到附件立即逐条处理。</small></div>
           <div class="field"><label for="notifyEncodingIssues">乱码文件通告</label><label class="toggle-row">告知发送者转码的文件<input id="notifyEncodingIssues" type="checkbox"></label></div>
+          <div class="field"><label for="notifyArchiveLimits">压缩包未识别通告</label><label class="toggle-row">告知超出上限未识别的成员<input id="notifyArchiveLimits" type="checkbox"></label></div>
           <div class="field"><label for="mergedForwardResults">查找结果样式</label><label class="toggle-row">使用合并转发聊天记录<input id="mergedForwardResults" type="checkbox"></label></div>
         </div>
       </div>
@@ -331,7 +332,7 @@
         note: document.getElementById('toolbarNote'), statusFilter: document.getElementById('statusFilter'), typeFilter: document.getElementById('typeFilter'), sourceFilter: document.getElementById('sourceFilter'), total: document.getElementById('statTotal'), images: document.getElementById('statImages'), docs: document.getElementById('statDocuments'), selected: document.getElementById('statSelected'), selectedCount: document.getElementById('selectedCount'),
         dot: document.getElementById('connectionDot'), connection: document.getElementById('connectionLabel'), scope: document.getElementById('restrictChatScope'), groups: document.getElementById('allowedGroupIds'), privates: document.getElementById('allowedPrivateIds'), adminOnlyCapture: document.getElementById('adminOnlyCapture'), adminIds: document.getElementById('adminIds'), mergedForwardResults: document.getElementById('mergedForwardResults'),
         progressPercent: document.getElementById('capturePercent'), progressMeta: document.getElementById('captureMeta'), progressMeter: document.getElementById('captureMeter'), progressFiles: document.getElementById('captureFiles'),
-        visionEnabled: document.getElementById('visionEnabled'), visionModelTargets: document.getElementById('visionModelTargets'), visionReviewMaxPages: document.getElementById('visionReviewMaxPages'), visionConsensusEnabled: document.getElementById('visionConsensusEnabled'), captureIntervalSeconds: document.getElementById('captureIntervalSeconds'), notifyEncodingIssues: document.getElementById('notifyEncodingIssues'), archiveExtractionEnabled: document.getElementById('archiveExtractionEnabled'), archiveMaxDepth: document.getElementById('archiveMaxDepth'), archiveMaxMembers: document.getElementById('archiveMaxMembers'), archiveMaxTotalSizeMb: document.getElementById('archiveMaxTotalSizeMb'), llmReviewEnabled: document.getElementById('llmReviewEnabled'), llmReviewTargets: document.getElementById('llmReviewTargets'), visionFileScope: document.getElementById('visionFileScope'), importModelReview: document.getElementById('importModelReview'),
+        visionEnabled: document.getElementById('visionEnabled'), visionModelTargets: document.getElementById('visionModelTargets'), visionReviewMaxPages: document.getElementById('visionReviewMaxPages'), visionConsensusEnabled: document.getElementById('visionConsensusEnabled'), captureIntervalSeconds: document.getElementById('captureIntervalSeconds'), notifyEncodingIssues: document.getElementById('notifyEncodingIssues'), notifyArchiveLimits: document.getElementById('notifyArchiveLimits'), archiveExtractionEnabled: document.getElementById('archiveExtractionEnabled'), archiveMaxDepth: document.getElementById('archiveMaxDepth'), archiveMaxMembers: document.getElementById('archiveMaxMembers'), archiveMaxTotalSizeMb: document.getElementById('archiveMaxTotalSizeMb'), llmReviewEnabled: document.getElementById('llmReviewEnabled'), llmReviewTargets: document.getElementById('llmReviewTargets'), visionFileScope: document.getElementById('visionFileScope'), importModelReview: document.getElementById('importModelReview'),
         uploadInput: document.getElementById('uploadInput'), uploadButton: document.getElementById('uploadButton'),
         dialog: document.getElementById('previewDialog'), title: document.getElementById('previewTitle'), subtitle: document.getElementById('previewSubtitle'), frame: document.getElementById('previewFrame'), details: document.getElementById('previewDetails'), download: document.getElementById('downloadLink'), toast: document.getElementById('toast')
       };
@@ -356,7 +357,10 @@
         return text(file.source_name || file.source_label || file.sender_name || file.sender || file.chat_name || file.chat_id || nested.sender_name || nested.sender_id || nested.chat_name || nested.chat_id || nested.unified_msg_origin || nested.message_id);
       };
       const typeName = file => isImage(file) ? '图片' : isSpreadsheet(file) ? '表格' : isPresentation(file) ? '演示文稿' : isArchive(file) ? '压缩文件' : isDocument(file) ? '文档' : '其他';
-      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? '仅保存' : '已捕获';
+      const archiveErrors = file => Array.isArray(file.archive_errors) ? file.archive_errors.map(String).filter(item => !item.startsWith('共 ')) : [];
+      const archiveLimited = file => file.archive_extraction_status === 'partial' || archiveErrors(file).length > 0;
+      const archiveStatusName = file => { const s = file.archive_extraction_status; if (!s) return '-'; const n = Number(file.archive_limited_count) || archiveErrors(file).filter(item => /未识别|未展开/.test(item)).length; if (archiveLimited(file) && s !== 'failed') return n ? `部分解压（${n} 个成员未识别）` : '部分解压'; return {extracted: '已解压', failed: '解压失败', empty: '空压缩包'}[s] || s; };
+      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? (archiveLimited(file) ? '部分解压' : '仅保存') : '已捕获';
       const setConnection = online => { els.dot.className = `status-dot ${online ? 'online' : 'offline'}`; els.connection.textContent = online ? '服务已连接' : '服务不可用'; };
       const showError = message => { els.error.textContent = message; els.error.hidden = !message; };
       let toastTimer;
@@ -444,7 +448,7 @@
         const confidence = Number(file.ocr_confidence); const clarity = Number(file.image_clarity);
         const encoding = file.encoding_issue ? `${text(file.source_encoding, '未知编码')} -> UTF-8` : text(file.source_encoding, '无需转码'); const sheets = Number(file.sheet_count) > 0 ? `${file.sheet_count}（${Array.isArray(file.sheet_names) ? file.sheet_names.join('、') : ''}）` : '-';
         const archiveSource = file.source && file.source.archive_member ? `${text(file.source.archive_name)} / ${text(file.source.archive_member)}` : '-';
-        const rows = [['文件名', fileName(file)], ['分类', typeName(file)], ['格式', text(file.format)], ['MIME', text(file.mime_type || file.mime)], ['状态', statusName(file)], ['大小', formatSize(file.size || file.bytes || file.file_size)], ['来源', source(file)], ['压缩包来源', archiveSource], ['压缩包成员数', text(file.archive_member_count)], ['压缩包状态', text(file.archive_extraction_status)], ['捕获时间', formatDate(file.captured_at || file.created_at || file.timestamp)], ['捕获次数', text(file.capture_count, '1')], ['文本编码', encoding], ['工作表数量', sheets], ['OCR 置信度', Number.isFinite(confidence) ? `${(confidence * 100).toFixed(1)}%` : '-'], ['图片清晰度', Number.isFinite(clarity) ? `${(clarity * 100).toFixed(1)}%` : '-'], ['识别文本', text(file.ocr_excerpt)], ['文件 ID', fileId(file)]];
+        const rows = [['文件名', fileName(file)], ['分类', typeName(file)], ['格式', text(file.format)], ['MIME', text(file.mime_type || file.mime)], ['状态', statusName(file)], ['大小', formatSize(file.size || file.bytes || file.file_size)], ['来源', source(file)], ['压缩包来源', archiveSource], ['压缩包成员数', text(file.archive_member_count)], ['压缩包状态', archiveStatusName(file)], ...(archiveErrors(file).length ? [['未识别成员', archiveErrors(file).slice(0, 50).join('\n')]] : []), ['捕获时间', formatDate(file.captured_at || file.created_at || file.timestamp)], ['捕获次数', text(file.capture_count, '1')], ['文本编码', encoding], ['工作表数量', sheets], ['OCR 置信度', Number.isFinite(confidence) ? `${(confidence * 100).toFixed(1)}%` : '-'], ['图片清晰度', Number.isFinite(clarity) ? `${(clarity * 100).toFixed(1)}%` : '-'], ['识别文本', text(file.ocr_excerpt)], ['文件 ID', fileId(file)]];
         els.details.innerHTML = rows.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(text(value))}</dd>`).join(''); if (typeof els.dialog.showModal === 'function') els.dialog.showModal(); else els.dialog.setAttribute('open', '');
       }
       function closePreview() { if (typeof els.dialog.close === 'function') els.dialog.close(); else els.dialog.removeAttribute('open'); }
@@ -537,6 +541,7 @@
         els.visionReviewMaxPages.value = c.vision_review_max_pages ?? 4;
         els.visionConsensusEnabled.checked = isOn(c.vision_consensus_enabled, true);
         els.notifyEncodingIssues.checked = isOn(c.notify_encoding_issues, true);
+        els.notifyArchiveLimits.checked = isOn(c.notify_archive_limits, true);
         els.captureIntervalSeconds.value = isOn(c.capture_window_enabled, true) ? (c.capture_interval_seconds ?? 30) : 0;
         els.archiveExtractionEnabled.checked = isOn(c.archive_extraction_enabled, true);
         els.archiveMaxDepth.value = c.archive_max_depth ?? 3; els.archiveMaxMembers.value = c.archive_max_members ?? 300; els.archiveMaxTotalSizeMb.value = c.archive_max_total_size_mb ?? 200;
@@ -563,6 +568,7 @@
           vision_file_scope: els.visionFileScope.value, import_model_review: els.importModelReview.checked,
           capture_window_enabled: interval > 0, capture_interval_seconds: interval > 0 ? interval : (Number(state.config.capture_interval_seconds) || 30),
           notify_encoding_issues: els.notifyEncodingIssues.checked,
+          notify_archive_limits: els.notifyArchiveLimits.checked,
           archive_extraction_enabled: els.archiveExtractionEnabled.checked, archive_max_depth: Math.max(0, Math.min(8, Number(els.archiveMaxDepth.value) || 0)),
           archive_max_members: Math.max(1, Math.min(5000, Number(els.archiveMaxMembers.value) || 300)), archive_max_total_size_mb: Math.max(1, Number(els.archiveMaxTotalSizeMb.value) || 200)
         };
@@ -581,7 +587,7 @@
       const bundleInput = document.getElementById('bundleInput'); const bundleButton = document.getElementById('bundleButton');
       const blobToBase64 = blob => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || ''); reader.onerror = () => reject(reader.error || new Error('读取文件失败')); reader.readAsDataURL(blob); });
       const modelReviewNote = info => info && Number(info.queued) > 0 ? `；${Number(info.queued)} 个图片 / PDF 已排队补跑模型识别` : '';
-      const importSummary = result => `新增 ${Number(result.created) || 0}，补全 ${Number(result.updated) || 0}，已存在 ${Number(result.exists) || 0}`;
+      const importSummary = result => `新增 ${Number(result.created) || 0}，补全 ${Number(result.updated) || 0}，已存在 ${Number(result.exists) || 0}${Array.isArray(result.archive_limits) && result.archive_limits.length ? `；${result.archive_limits.length} 个压缩包有成员超出上限未识别，详见文件详情` : ''}`;
       async function importBundle(file) {
         if (!file) return;
         const CHUNK = 2 * 1024 * 1024; const uploadId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`.replace(/[^A-Za-z0-9]/g, '').padEnd(12, '0');

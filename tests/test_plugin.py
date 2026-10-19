@@ -163,6 +163,55 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(len(expansion.members), 1)
         self.assertGreaterEqual(expansion.skipped, 1)
 
+    def test_archive_limits_are_reported(self):
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("深层名单.txt", "姓名：王五".encode("utf-8"))
+        middle = io.BytesIO()
+        with zipfile.ZipFile(middle, "w") as archive:
+            archive.writestr("第三层.zip", inner.getvalue())
+        archive_path = self.temp_path / "多层.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("第二层.zip", middle.getvalue())
+            archive.writestr("a.txt", "姓名：张三".encode("utf-8"))
+            archive.writestr("b.txt", "姓名：李四".encode("utf-8"))
+        plugin = make_plugin(
+            self.temp_path,
+            vision_enabled=False,
+            capture_progress_notify=False,
+            archive_extraction_enabled=True,
+            archive_max_depth=2,
+            archive_max_members=3,
+        )
+        event = FakeEvent([{"type": "file", "name": archive_path.name, "path": str(archive_path)}])
+        records = asyncio.run(plugin.capture_event(event))
+        root = next(record for record in records if record["name"] == "多层.zip")
+        self.assertEqual(root["archive_extraction_status"], "partial")
+        self.assertEqual(root["archive_limited_count"], 2, root["archive_errors"])
+        joined = "\n".join(root["archive_errors"])
+        self.assertIn("未展开：第二层.zip/第三层.zip", joined)
+        self.assertIn("超出成员个数上限（3 个），未识别：", joined)
+        notice = main._archive_notice(records)
+        self.assertIn("压缩包「多层.zip」有 2 个成员未识别", notice)
+        self.assertTrue(any("多层.zip" in str(item) and "未识别" in str(item) for item in event.sent))
+        public = main._public_record(root)
+        self.assertEqual(public["archive_limited_count"], 2)
+
+        quiet = make_plugin(self.temp_path / "q", vision_enabled=False, capture_progress_notify=False,
+                            archive_max_depth=2, archive_max_members=3, notify_archive_limits=False)
+        quiet_event = FakeEvent([{"type": "file", "name": archive_path.name, "path": str(archive_path)}])
+        asyncio.run(quiet.capture_event(quiet_event))
+        self.assertFalse(any("未识别" in str(item) for item in quiet_event.sent))
+
+    def test_archive_without_limits_has_no_notice(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("a.txt", "姓名：张三".encode("utf-8"))
+        children, errors = main._archive_candidates({"id": "x", "name": "ok.zip"}, buffer.getvalue(), {"archive_extraction_enabled": True})
+        self.assertEqual(len(children), 1)
+        self.assertEqual(errors, [])
+        self.assertEqual(main._archive_notice([{"name": "ok.zip", "archive_errors": []}]), "")
+
     def test_plugin_page_batch_upload_reuses_capture_and_archive_pipeline(self):
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
