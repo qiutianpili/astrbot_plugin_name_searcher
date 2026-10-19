@@ -1222,6 +1222,7 @@ class NameSearcherPluginTests(unittest.TestCase):
             vision_enabled=True,
             vision_model_targets=["provider-a::vision-a", "provider-b::vision-b"],
             vision_consensus_enabled=True,
+            vision_file_scope="all",
             capture_progress_notify=False,
         )
         calls = []
@@ -1429,6 +1430,138 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertFalse(paths[1].exists())
         self.assertEqual(plugin.store.list(), [])
         self.assertEqual(json.loads(plugin.store.index_path.read_text(encoding="utf-8")), [])
+
+    # ---------- v1.8.0 ----------
+    @staticmethod
+    def _gbk_zip(entries):
+        """Build a zip whose member names are raw GBK bytes without the UTF-8 flag (like WinRAR/360)."""
+        buffer = io.BytesIO()
+        placeholders = {}
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+            for index, (name, data) in enumerate(entries):
+                raw = name.encode("gbk")
+                placeholder = (f"P{index}_" + "x" * len(raw))[: len(raw)].encode("ascii")
+                placeholders[placeholder] = raw
+                archive.writestr(placeholder.decode("ascii"), data)
+        blob = buffer.getvalue()
+        for placeholder, raw in placeholders.items():
+            blob = blob.replace(placeholder, raw)
+        return blob
+
+    def test_gbk_zip_member_names_are_not_garbled(self):
+        archive_path = self.temp_path / "资料.zip"
+        archive_path.write_bytes(self._gbk_zip([("2024年9月名单.csv", "姓名,班级\n赵六,软件2403".encode("utf-8"))]))
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)
+        records = asyncio.run(plugin.capture_event(FakeEvent([{"type": "file", "name": archive_path.name, "path": str(archive_path)}])))
+        names = {record["name"] for record in records}
+        self.assertIn("2024年9月名单.csv", names)
+        self.assertIn("赵六", plugin._lookup("赵六"))
+
+    def test_stored_garbled_archive_names_are_repaired_on_load(self):
+        plugin = make_plugin(self.temp_path)
+        member = "sub/" + "9月产品名单.xlsx".encode("gbk").decode("cp437")
+        record = plugin.store.add_bytes(member, b"x", kind="spreadsheet", mime="application/octet-stream", source={"archive_member": member})
+        self.assertNotIn("名单", record["name"])
+        reloaded = main.ArtifactStore(plugin.store.root)
+        fixed = reloaded.get(record["id"])
+        self.assertEqual(fixed["name"], "9月产品名单.xlsx")
+        self.assertEqual(fixed["source"]["archive_member"], "sub/9月产品名单.xlsx")
+        self.assertEqual(main._fix_zip_name("résumé.pdf"), "résumé.pdf")
+
+    def test_vision_scope_defaults_to_images_and_pdf(self):
+        plugin = make_plugin(self.temp_path)
+        self.assertTrue(main._model_scope_allows({"name": "a.PNG"}, plugin.config))
+        self.assertTrue(main._model_scope_allows({"name": "b.pdf"}, plugin.config))
+        self.assertFalse(main._model_scope_allows({"name": "c.xlsx"}, plugin.config))
+        self.assertTrue(main._model_scope_allows({"name": "c.xlsx"}, {"vision_file_scope": "all"}))
+        source = self.temp_path / "roster.txt"
+        source.write_text("张三", encoding="utf-8")
+        plugin = make_plugin(self.temp_path, vision_enabled=True, llm_review_enabled=True, capture_progress_notify=False)
+
+        async def never(*_args, **_kwargs):
+            raise AssertionError("model must not be called for txt")
+
+        with patch.object(main, "_call_vision_model", side_effect=never), patch.object(main, "_call_text_model", side_effect=never):
+            records = asyncio.run(plugin.capture_event(FakeEvent([{"type": "file", "name": source.name, "path": str(source)}])))
+        self.assertEqual(records[0]["vision_status"], "skipped")
+        self.assertEqual(records[0]["llm_review_status"], "skipped")
+        self.assertTrue(plugin._recognition_completed(plugin.store.get(records[0]["id"])))
+
+    def test_llm_review_uses_multiple_models_with_consensus(self):
+        plugin = make_plugin(self.temp_path, llm_review_enabled=True, llm_review_targets="pa::m1\npb::m2")
+        record = plugin.store.add_bytes("名单.png", b"img", kind="image", mime="image/png", source={})
+        plugin.store.update(record["id"], ocr_text="张山 软件2401")
+        calls = []
+
+        async def text_call(_context, prompt, **kwargs):
+            calls.append((kwargs.get("provider_name"), kwargs.get("model_name"), "汇总" in prompt or "多个模型" in prompt))
+            if len(calls) == 3:
+                return "张三 软件2401", "consensus"
+            return f"{kwargs.get('model_name')}: 张三 软件2401", "mock"
+
+        with patch.object(main, "_call_text_model", side_effect=text_call):
+            result = asyncio.run(plugin._apply_llm_review(main.PanelUploadEvent(), plugin.store.get(record["id"])))
+        self.assertEqual([c[:2] for c in calls], [("pa", "m1"), ("pb", "m2"), ("pa", "m1")])
+        self.assertTrue(calls[2][2])
+        self.assertEqual(result["llm_review_status"], "completed")
+        self.assertEqual(result["llm_review_consensus_status"], "completed")
+        self.assertEqual(result["llm_review_models_completed"], 2)
+        self.assertEqual(result["ocr_text"], "张三 软件2401")
+        self.assertIn("张三", plugin._lookup("张三"))
+
+    def test_imported_images_are_queued_for_model_review(self):
+        plugin = make_plugin(self.temp_path, vision_enabled=True, llm_review_enabled=True, vision_model_targets="pa::v1")
+        image = plugin.store.add_bytes("照片.jpg", b"jpg", kind="image", mime="image/jpeg", source={"upload_source": "local-tool"})
+        sheet = plugin.store.add_bytes("表.xlsx", b"x", kind="spreadsheet", mime="application/octet-stream", source={"upload_source": "local-tool"})
+        for item in (image, sheet):
+            plugin.store.update(item["id"], ocr_text="本地 张山", extraction_status="extracted", processing_status="completed")
+
+        async def vision_call(*_args, **_kwargs):
+            return "姓名 张三", "mock-vision"
+
+        async def text_call(*_args, **_kwargs):
+            return "姓名 张三（已审核）", "mock-review"
+
+        async def scenario():
+            info = plugin.queue_model_review([image["id"], sheet["id"]])
+            await plugin._model_review_task
+            return info
+
+        with patch.object(main, "_prepare_vision_review_images", side_effect=lambda path, *a: [path]), \
+             patch.object(main, "_call_vision_model", side_effect=vision_call), \
+             patch.object(main, "_call_text_model", side_effect=text_call):
+            info = asyncio.run(scenario())
+        self.assertEqual(info["queued"], 1)
+        done = plugin.store.get(image["id"])
+        self.assertEqual(done["model_review_status"], "completed")
+        self.assertEqual(done["vision_status"], "extracted")
+        self.assertEqual(done["llm_review_status"], "completed")
+        self.assertIn("已审核", done["ocr_text"])
+        self.assertNotIn("model_review_status", plugin.store.get(sheet["id"]))
+        self.assertEqual(plugin.queue_model_review()["queued"], 0)
+        self.assertFalse(make_plugin(self.temp_path / "off", vision_enabled=False).queue_model_review()["ok"])
+
+    def test_local_tool_runs_are_independent_and_accept_files(self):
+        import subprocess
+        tool = Path(main.__file__).parent / "tools" / "name_searcher_local.py"
+        work = self.temp_path / "work"
+        first = self.temp_path / "一.txt"
+        second = self.temp_path / "二.txt"
+        third = self.temp_path / "三.csv"
+        first.write_text("张三", encoding="utf-8")
+        second.write_text("李四", encoding="utf-8")
+        third.write_text("姓名\n王五", encoding="utf-8")
+        out1, out2 = self.temp_path / "b1.zip", self.temp_path / "b2.zip"
+        subprocess.run([sys.executable, str(tool), "run", str(first), "--work", str(work), "--out", str(out1)], check=True, capture_output=True)
+        subprocess.run([sys.executable, str(tool), "run", str(second), str(third), "--work", str(work), "--out", str(out2)], check=True, capture_output=True)
+
+        def names(bundle):
+            with zipfile.ZipFile(bundle) as archive:
+                return sorted(item["name"] for item in json.loads(archive.read("manifest.json"))["records"])
+
+        self.assertEqual(names(out1), ["一.txt"])
+        self.assertEqual(names(out2), ["三.csv", "二.txt"])
+        self.assertEqual(len(list((work / "runs").iterdir())), 2)
 
 
 if __name__ == "__main__":

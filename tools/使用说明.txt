@@ -1,19 +1,23 @@
-NameSearcher 本地识别工具 v1.7.2
+NameSearcher 本地识别工具 v1.8.0
 
 1. 安装 Python 3.10 或更高版本（安装时勾选 Add python.exe to PATH）。
 2. 在本文件夹打开终端，运行：
        pip install -r requirements-local.txt
-3. 识别（图形界面，推荐）：双击“本地识别GUI.bat”，选文件夹，点“识别并打包”。
+3. 识别（图形界面，推荐）：双击“本地识别GUI.bat”，
+   用“添加文件…”（可以多选）或“添加文件夹…”放入要识别的内容，点“识别并打包”。
    界面里有进度条、停止按钮、查看状态和“打开识别包位置”；缺依赖时会提示一键安装。
-   也可以把文件夹拖到“本地识别GUI.bat”上直接带入。
-   命令行方式：把要识别的文件夹拖到“本地识别.bat”上；或运行
-       python name_searcher_local.py run D:\要识别的文件夹
-   可以随时 Ctrl+C 中断，重跑同一命令会跳过已经识别完的文件。
-4. 完成后在 ns_local_work 文件夹里得到 bundle-时间.zip。
+   也可以把文件或文件夹拖到“本地识别GUI.bat”上直接带入。
+   命令行方式：把文件或文件夹（可多选）拖到“本地识别.bat”上；或运行
+       python name_searcher_local.py run D:\文件夹 D:\单个文件.pdf
+4. 每次识别都是独立的：结果放在 ns_local_work\runs\时间\，
+   识别包 ns_local_work\bundle-时间.zip 只包含这一次添加的文件，不会带上以前识别过的。
+   中途停止后，点“打包本次结果”可以只打包已完成的部分。
 5. 打开 AstrBot 的 NameSearcher 插件页，点“导入识别包”，选这个 zip。
    很大的识别包也可以用 SFTP 上传到插件存储目录的 import_inbox 文件夹，再点“扫描导入目录”。
+6. 本地工具只做 OCR 和文档解析，不调用大模型。导入后，插件会在服务器后台
+   用你在插件页选的视觉模型和 LLM 对其中的图片和 PDF 再识别、审核一遍
+   （需要在插件页开启“视觉模型识别”或“LLM 结果审核”，以及“导入后补跑模型”）。
 
 其他命令：
-   python name_searcher_local.py status   查看识别情况
-   python name_searcher_local.py pack     重新打包已识别的结果
-注意：本地工具不调用 AstrBot 的视觉模型和 LLM 审核。
+   python name_searcher_local.py status   查看最近一次的识别情况
+   python name_searcher_local.py pack     重新打包最近一次的结果（--run 目录 指定某一次）

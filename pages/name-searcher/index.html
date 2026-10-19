@@ -261,11 +261,13 @@
       <div class="config-group">
         <div class="group-title">识别与审核</div>
         <div class="config-grid">
-          <div class="field"><label for="visionEnabled">视觉模型识别</label><label class="toggle-row">用模型识别图片和文档<input id="visionEnabled" type="checkbox"></label></div>
+          <div class="field"><label for="visionEnabled">视觉模型识别</label><label class="toggle-row">用模型识别图片和 PDF<input id="visionEnabled" type="checkbox"></label></div>
+          <div class="field"><label for="visionFileScope">模型处理范围</label><select id="visionFileScope"><option value="image_pdf">只处理图片和 PDF</option><option value="all">所有文件</option></select><small class="field-hint">视觉识别和 LLM 审核都按这个范围。</small></div>
           <div class="field"><label for="visionReviewMaxPages">每份文件送审页数</label><input id="visionReviewMaxPages" type="number" min="1" max="12" step="1" placeholder="4"></div>
           <div class="field"><label for="visionConsensusEnabled">多模型共识</label><label class="toggle-row">综合多个模型的结果<input id="visionConsensusEnabled" type="checkbox"></label></div>
           <div class="field field-wide"><label for="visionModelTargets">视觉模型</label><select id="visionModelTargets" multiple size="5" aria-label="视觉模型"></select><small class="field-hint">可多选（按住 Ctrl / ⌘）；不选则使用当前会话的模型。</small></div>
-          <div class="field"><label for="llmReviewTarget">LLM 结果审核</label><select id="llmReviewTarget"></select><small class="field-hint">选“关闭”即不审核。</small></div>
+          <div class="field"><label for="llmReviewEnabled">LLM 结果审核</label><label class="toggle-row">识别后再由 LLM 审核修正<input id="llmReviewEnabled" type="checkbox"></label></div>
+          <div class="field field-wide"><label for="llmReviewTargets">LLM 审核模型</label><select id="llmReviewTargets" multiple size="5" aria-label="LLM 审核模型"></select><small class="field-hint">可多选；多个模型时由第一个模型汇总。不选则使用当前会话的模型。</small></div>
         </div>
       </div>
       <div class="config-group">
@@ -290,6 +292,8 @@
         <div class="config-grid">
           <div class="field field-wide"><label>大批量文件</label><div class="field-value">先在自己电脑上运行本地识别工具（name_searcher_local.py），再用“导入识别包”上传；服务器只校验和写索引，不跑 OCR。识别包很大时，也可以用 SFTP 放进存储目录下的 <code>import_inbox</code> 文件夹。</div></div>
           <div class="field"><label>导入目录</label><button id="scanInboxButton" class="button" type="button">扫描导入目录</button></div>
+          <div class="field"><label for="importModelReview">导入后补跑模型</label><label class="toggle-row">导入后用视觉模型和 LLM 再识别<input id="importModelReview" type="checkbox"></label></div>
+          <div class="field"><label>已有文件</label><button id="modelReviewButton" class="button" type="button" title="对还没经过视觉模型 / LLM 的图片和 PDF 补跑一遍">补跑模型识别</button></div>
         </div>
       </div>
       <p class="help">存储目录、人员库文件、旧版面板地址和访问令牌只能在 AstrBot 插件配置中修改。清理文件请用文件列表上方的“一键清理”，只删除插件保存的副本，聊天原始消息不受影响。</p>
@@ -327,7 +331,7 @@
         note: document.getElementById('toolbarNote'), statusFilter: document.getElementById('statusFilter'), typeFilter: document.getElementById('typeFilter'), sourceFilter: document.getElementById('sourceFilter'), total: document.getElementById('statTotal'), images: document.getElementById('statImages'), docs: document.getElementById('statDocuments'), selected: document.getElementById('statSelected'), selectedCount: document.getElementById('selectedCount'),
         dot: document.getElementById('connectionDot'), connection: document.getElementById('connectionLabel'), scope: document.getElementById('restrictChatScope'), groups: document.getElementById('allowedGroupIds'), privates: document.getElementById('allowedPrivateIds'), adminOnlyCapture: document.getElementById('adminOnlyCapture'), adminIds: document.getElementById('adminIds'), mergedForwardResults: document.getElementById('mergedForwardResults'),
         progressPercent: document.getElementById('capturePercent'), progressMeta: document.getElementById('captureMeta'), progressMeter: document.getElementById('captureMeter'), progressFiles: document.getElementById('captureFiles'),
-        visionEnabled: document.getElementById('visionEnabled'), visionModelTargets: document.getElementById('visionModelTargets'), visionReviewMaxPages: document.getElementById('visionReviewMaxPages'), visionConsensusEnabled: document.getElementById('visionConsensusEnabled'), captureIntervalSeconds: document.getElementById('captureIntervalSeconds'), notifyEncodingIssues: document.getElementById('notifyEncodingIssues'), archiveExtractionEnabled: document.getElementById('archiveExtractionEnabled'), archiveMaxDepth: document.getElementById('archiveMaxDepth'), archiveMaxMembers: document.getElementById('archiveMaxMembers'), archiveMaxTotalSizeMb: document.getElementById('archiveMaxTotalSizeMb'), llmReviewTarget: document.getElementById('llmReviewTarget'),
+        visionEnabled: document.getElementById('visionEnabled'), visionModelTargets: document.getElementById('visionModelTargets'), visionReviewMaxPages: document.getElementById('visionReviewMaxPages'), visionConsensusEnabled: document.getElementById('visionConsensusEnabled'), captureIntervalSeconds: document.getElementById('captureIntervalSeconds'), notifyEncodingIssues: document.getElementById('notifyEncodingIssues'), archiveExtractionEnabled: document.getElementById('archiveExtractionEnabled'), archiveMaxDepth: document.getElementById('archiveMaxDepth'), archiveMaxMembers: document.getElementById('archiveMaxMembers'), archiveMaxTotalSizeMb: document.getElementById('archiveMaxTotalSizeMb'), llmReviewEnabled: document.getElementById('llmReviewEnabled'), llmReviewTargets: document.getElementById('llmReviewTargets'), visionFileScope: document.getElementById('visionFileScope'), importModelReview: document.getElementById('importModelReview'),
         uploadInput: document.getElementById('uploadInput'), uploadButton: document.getElementById('uploadButton'),
         dialog: document.getElementById('previewDialog'), title: document.getElementById('previewTitle'), subtitle: document.getElementById('previewSubtitle'), frame: document.getElementById('previewFrame'), details: document.getElementById('previewDetails'), download: document.getElementById('downloadLink'), toast: document.getElementById('toast')
       };
@@ -522,12 +526,6 @@
       }
       const isOn = (value, fallback) => value === undefined || value === null || value === '' ? fallback : value === true || String(value).toLowerCase() === 'true';
       const splitTargets = raw => Array.isArray(raw) ? raw.map(String).map(item => item.trim()).filter(Boolean) : String(raw || '').split(/[\r\n,，;；]+/).map(item => item.trim()).filter(Boolean);
-      function renderLlmOptions(providers, current) {
-        const options = [{value: '__off__', label: '关闭'}, {value: '', label: '当前会话模型'}];
-        providers.forEach(item => (Array.isArray(item.models) && item.models.length ? item.models : ['']).forEach(model => options.push({value: `${item.id || item.value}::${model}`, label: model ? `${item.label || item.id} / ${model}` : `${item.label || item.id} / 默认模型`})));
-        if (!options.some(item => item.value === current)) options.push({value: current, label: `${current}（已配置）`});
-        els.llmReviewTarget.innerHTML = options.map(item => `<option value="${escape(item.value)}"${item.value === current ? ' selected' : ''}>${escape(item.label)}</option>`).join('');
-      }
       async function loadConfig() {
         try { state.config = (await request('/config')) || {}; } catch (_) { state.config = {}; }
         const c = state.config;
@@ -547,18 +545,22 @@
         // 旧版单模型设置并入多选列表
         if (!targets.length && (c.vision_provider || c.vision_model)) targets = [`${c.vision_provider || ''}::${c.vision_model || ''}`];
         els.visionModelTargets.innerHTML = renderVisionTargetOptions(providers, targets);
-        const llmCurrent = !isOn(c.llm_review_enabled, false) ? '__off__' : (c.llm_review_provider || c.llm_review_model ? `${c.llm_review_provider || ''}::${c.llm_review_model || ''}` : '');
-        renderLlmOptions(providers, llmCurrent);
+        let llmTargets = splitTargets(c.llm_review_targets);
+        if (!llmTargets.length && (c.llm_review_provider || c.llm_review_model)) llmTargets = [`${c.llm_review_provider || ''}::${c.llm_review_model || ''}`];
+        els.llmReviewTargets.innerHTML = renderVisionTargetOptions(providers, llmTargets);
+        els.llmReviewEnabled.checked = isOn(c.llm_review_enabled, false);
+        els.visionFileScope.value = c.vision_file_scope === 'all' ? 'all' : 'image_pdf';
+        els.importModelReview.checked = isOn(c.import_model_review, true);
       }
       async function saveConfig() {
         const interval = Math.max(0, Math.floor(Number(els.captureIntervalSeconds.value) || 0));
-        const llm = els.llmReviewTarget.value; const [llmProvider, llmModel] = llm === '__off__' || llm === '' ? ['', ''] : [llm.split('::')[0], llm.split('::').slice(1).join('::')];
         const payload = {
           restrict_chat_scope: els.scope.checked, allowed_group_ids: els.groups.value.trim(), allowed_private_ids: els.privates.value.trim(),
           admin_only_capture: els.adminOnlyCapture.checked, admin_ids: els.adminIds.value.trim(), merged_forward_results: els.mergedForwardResults.checked,
           vision_enabled: els.visionEnabled.checked, vision_model_targets: [...els.visionModelTargets.selectedOptions].map(option => option.value).join('\n'), vision_provider: '', vision_model: '',
           vision_review_max_pages: Math.max(1, Math.min(12, Number(els.visionReviewMaxPages.value) || 4)), vision_consensus_enabled: els.visionConsensusEnabled.checked,
-          llm_review_enabled: llm !== '__off__', llm_review_provider: llmProvider, llm_review_model: llmModel,
+          llm_review_enabled: els.llmReviewEnabled.checked, llm_review_targets: [...els.llmReviewTargets.selectedOptions].map(option => option.value).join('\n'), llm_review_provider: '', llm_review_model: '',
+          vision_file_scope: els.visionFileScope.value, import_model_review: els.importModelReview.checked,
           capture_window_enabled: interval > 0, capture_interval_seconds: interval > 0 ? interval : (Number(state.config.capture_interval_seconds) || 30),
           notify_encoding_issues: els.notifyEncodingIssues.checked,
           archive_extraction_enabled: els.archiveExtractionEnabled.checked, archive_max_depth: Math.max(0, Math.min(8, Number(els.archiveMaxDepth.value) || 0)),
@@ -578,6 +580,7 @@
       els.uploadButton.addEventListener('click', () => els.uploadInput.click());
       const bundleInput = document.getElementById('bundleInput'); const bundleButton = document.getElementById('bundleButton');
       const blobToBase64 = blob => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || ''); reader.onerror = () => reject(reader.error || new Error('读取文件失败')); reader.readAsDataURL(blob); });
+      const modelReviewNote = info => info && Number(info.queued) > 0 ? `；${Number(info.queued)} 个图片 / PDF 已排队补跑模型识别` : '';
       const importSummary = result => `新增 ${Number(result.created) || 0}，补全 ${Number(result.updated) || 0}，已存在 ${Number(result.exists) || 0}`;
       async function importBundle(file) {
         if (!file) return;
@@ -591,9 +594,10 @@
           }
           bundleButton.textContent = '导入中…';
           const result = await request('/import/finish', {method:'POST', body: JSON.stringify({upload_id: uploadId, name: file.name})});
-          toast(`识别包已导入：${importSummary(result || {})}`);
+          toast(`识别包已导入：${importSummary(result || {})}${modelReviewNote(result && result.model_review)}`);
           if (result && Array.isArray(result.errors) && result.errors.length) showError(result.errors.slice(0, 20).join('；'));
           await loadFiles();
+          loadProgress();
         } catch (error) { showError(`导入识别包失败：${error.message}`); }
         finally { bundleButton.disabled = false; bundleButton.textContent = '导入识别包'; bundleInput.value = ''; }
       }
@@ -603,13 +607,25 @@
         const button = event.currentTarget; button.disabled = true;
         try {
           const result = await request('/import/scan', {method:'POST', body: JSON.stringify({})}); const bundles = Array.isArray(result && result.bundles) ? result.bundles : [];
-          toast(bundles.length ? bundles.map(item => item.ok === false ? `${item.bundle}：${item.message}` : `${item.bundle}：${importSummary(item)}`).join('；') : '导入目录里没有识别包');
+          toast((bundles.length ? bundles.map(item => item.ok === false ? `${item.bundle}：${item.message}` : `${item.bundle}：${importSummary(item)}`).join('；') : '导入目录里没有识别包') + modelReviewNote(result && result.model_review));
+          loadProgress();
           const errors = bundles.flatMap(item => Array.isArray(item.errors) ? item.errors : []); if (errors.length) showError(errors.slice(0, 20).join('；'));
           await loadFiles();
         } catch (error) { showError(`扫描导入目录失败：${error.message}`); }
         finally { button.disabled = false; }
       });
       els.uploadInput.addEventListener('change', () => uploadFiles(els.uploadInput.files));
+      document.getElementById('modelReviewButton').addEventListener('click', async event => {
+        const button = event.currentTarget; button.disabled = true; showError('');
+        try {
+          const ids = state.selected.size ? [...state.selected] : undefined;
+          const result = await request('/model-review', {method:'POST', body: JSON.stringify(ids ? {ids} : {})});
+          if (result && result.ok === false) showError(result.message || '无法补跑');
+          else toast(Number(result && result.queued) > 0 ? `已排队 ${Number(result.queued)} 个文件，后台逐个识别` : '没有需要补跑的图片或 PDF');
+          loadProgress();
+        } catch (error) { showError(`补跑模型识别失败：${error.message}`); }
+        finally { button.disabled = false; }
+      });
       els.search.addEventListener('input', render);
       [els.statusFilter, els.typeFilter, els.sourceFilter].forEach(select => select.addEventListener('change', () => { state.expanded = false; render(); }));
       els.list.addEventListener('change', event => { const checkbox = event.target.closest('[data-select]'); if (!checkbox) return; const id = checkbox.dataset.select; checkbox.checked ? state.selected.add(id) : state.selected.delete(id); updateStats(); });

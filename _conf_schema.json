@@ -44,7 +44,7 @@
   "vision_enabled": {
     "description": "启用模型视觉识别",
     "type": "bool",
-    "hint": "开启后，每份成功下载的文件都会生成视觉审阅页，并提交给 AstrBot 当前或指定的视觉模型。",
+    "hint": "开启后，图片和 PDF（可在“模型处理范围”改为所有文件）会生成审阅页并提交给所选视觉模型。",
     "default": true
   },
   "vision_provider": {
@@ -97,29 +97,53 @@
     "hint": "单张图片调用视觉模型的最长等待时间。",
     "default": 60
   },
+  "vision_file_scope": {
+    "description": "模型处理范围",
+    "type": "string",
+    "options": [
+      "image_pdf",
+      "all"
+    ],
+    "hint": "image_pdf：视觉识别和 LLM 审核只处理图片和 PDF；all：所有文件。",
+    "default": "image_pdf"
+  },
   "llm_review_enabled": {
     "description": "启用 LLM 文件审核",
     "type": "bool",
     "hint": "开启后，文件识别结果会提交给所选 AstrBot 模型提供商审核并修正；关闭时仅使用本地或视觉模型识别。",
     "default": false
   },
+  "llm_review_targets": {
+    "description": "LLM 审核模型",
+    "type": "string",
+    "hint": "每行一个 provider::model，可在插件页中直接多选；多个模型时由第一个模型汇总共识。留空使用当前会话的模型。",
+    "default": ""
+  },
   "llm_review_provider": {
     "description": "LLM 审核提供商 ID",
     "type": "string",
     "hint": "填写 AstrBot 模型提供商 ID；留空使用当前会话提供商。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "llm_review_model": {
     "description": "LLM 审核模型名称",
     "type": "string",
     "hint": "留空使用提供商默认模型。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "llm_review_prompt": {
     "description": "LLM 审核提示词",
     "type": "string",
     "hint": "可使用 {name} 和 {text} 占位符；模型应输出可检索的修正文本。",
     "default": "请审核下面的文件识别结果。判断是否包含可检索的人名及班级、专业等信息；如有明显错误，请给出修正后的简洁文本。只输出审核结论和修正文本。\n\n文件名：{name}\n识别结果：{text}"
+  },
+  "llm_review_consensus_prompt": {
+    "description": "LLM 多模型审核汇总提示词",
+    "type": "string",
+    "hint": "选了多个审核模型时，用于汇总各模型的审核结果。",
+    "default": "下面是多个模型对同一份文件识别结果的审核与修正。请逐行核对姓名、编号、班级、专业，取多数一致或最可信的写法，不得删行或合并不同人员，只输出最终校正文本。"
   },
   "llm_review_timeout_seconds": {
     "description": "LLM 审核超时（秒）",
@@ -291,5 +315,11 @@
     "type": "int",
     "default": 2048,
     "hint": "插件页“导入识别包”允许的最大识别包。识别包由本地识别工具 name_searcher_local.py 生成。"
+  },
+  "import_model_review": {
+    "description": "导入后补跑模型识别",
+    "type": "bool",
+    "hint": "导入识别包后，在后台逐个用视觉模型识别并用 LLM 审核其中的图片和 PDF（需开启对应功能）。",
+    "default": true
   }
 }

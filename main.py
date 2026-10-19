@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.7.2"
+PLUGIN_VERSION = "1.8.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -191,6 +191,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_consensus_prompt": "请综合本地解析和多个视觉模型结果，逐行核对姓名、编号、班级、专业及表格列关系。不得概括、删行或合并不同人员；保留完整可检索原文和表格结构，只输出最终校正文本。",
     "vision_prompt": "请完整识别这份文件页面中的正文、表格和图片文字，逐行保留姓名、编号、班级、专业及所有单元格关系。不得概括、删行或合并不同人员，只输出可检索的完整原文。",
     "vision_timeout_seconds": 60,
+    "vision_file_scope": "image_pdf",
     "capture_window_enabled": True,
     "capture_interval_seconds": 30,
     "capture_progress_notify": True,
@@ -202,6 +203,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llm_review_enabled": False,
     "llm_review_provider": "",
     "llm_review_model": "",
+    "llm_review_targets": "",
+    "llm_review_consensus_prompt": "下面是多个模型对同一份文件识别结果的审核与修正。请逐行核对姓名、编号、班级、专业，取多数一致或最可信的写法，不得删行或合并不同人员，只输出最终校正文本。",
     "llm_review_prompt": "请审核下面的文件识别结果。判断是否包含可检索的人名及班级、专业等信息；如有明显错误，请给出修正后的简洁文本。只输出审核结论和修正文本。\n\n文件名：{name}\n识别结果：{text}",
     "llm_review_timeout_seconds": 60,
     "panel_mount_path": "/api/name-searcher",
@@ -210,6 +213,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "name_match_threshold": 0.85,
     "min_free_memory_mb": 200,
     "import_max_bundle_mb": 2048,
+    "import_model_review": True,
 }
 
 # Keys that only the AstrBot plugin config (admin) may change.  The plugin
@@ -348,6 +352,9 @@ def _artifact_search_sections(record: Mapping[str, Any]) -> list[tuple[str, str]
             model = str(result.get("model") or "").strip()
             label = "::".join(part for part in (provider, model) if part)
         add(f"视觉模型 {label or '未命名结果'}", result.get("text"))
+    for result in record.get("llm_review_results") or []:
+        if isinstance(result, Mapping):
+            add(f"LLM 审核 {result.get('label') or '未命名模型'}", result.get("text"))
     # Compatibility with records created by older or third-party revisions.
     for key, label in (
         ("vision_text", "视觉模型结果"),
@@ -487,6 +494,13 @@ class ArtifactStore:
                 self._records = [item for item in data if isinstance(item, dict)]
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             self._records = []
+        repaired = sum(1 for item in self._records if _repair_record_names(item))
+        if repaired:
+            try:
+                self._save()
+                _log("info", "NameSearcher repaired %s garbled archive member names", repaired)
+            except OSError:
+                pass
 
     def _save(self) -> None:
         temporary = self.index_path.with_suffix(".tmp")
@@ -811,6 +825,7 @@ def _import_bundle(store: "ArtifactStore", bundle_path: Path, config: Mapping[st
             source["import_bundle"] = bundle_label
             adopted = dict(fields)
             adopted["source"] = source
+            _repair_record_names(adopted)
             record, outcome = store.import_record(adopted, content)
             summary[outcome] += 1
             old_id = str(fields.get("id") or "")
@@ -822,6 +837,7 @@ def _import_bundle(store: "ArtifactStore", bundle_path: Path, config: Mapping[st
                 store.save()
         store.remap_archive_ids(id_map, touched)
         store.save()
+    summary["record_ids"] = touched
     summary["total"] = len(records)
     summary["ok"] = True
     return summary
@@ -2110,6 +2126,59 @@ def _safe_archive_member(name: Any) -> Optional[str]:
     return "/".join(parts)
 
 
+def _fix_zip_name(name: str, utf8_flag: bool = False) -> str:
+    """Recover CJK member names that zipfile decoded as CP437.
+
+    Windows (WinRAR/360/Bandizip legacy mode) writes GBK names without the
+    UTF-8 flag, so Python shows them as ``2024_º_9_Ñ.xlsx``.  Re-encode with
+    CP437 and try UTF-8 first (tools that forget the flag), then GB18030.
+    """
+
+    if utf8_flag or not name or name.isascii():
+        return name
+    try:
+        raw = name.encode("cp437")
+    except UnicodeEncodeError:
+        return name
+    for encoding in ("utf-8", "gb18030", "big5", "shift_jis"):
+        try:
+            fixed = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if fixed != name and _CJK_CHAR.search(fixed):
+            return fixed
+    return name
+
+
+def _repair_mojibake_name(name: Any) -> str:
+    """Repair an already-stored path whose segments are CP437-decoded GBK."""
+
+    text = str(name or "")
+    if not text or text.isascii():
+        return text
+    return "/".join(_fix_zip_name(part) for part in text.split("/"))
+
+
+def _repair_record_names(record: dict[str, Any]) -> bool:
+    """Fix garbled names on archive-member records in place; True if changed."""
+
+    source = record.get("source")
+    if not isinstance(source, dict) or not source.get("archive_member"):
+        return False
+    member = _repair_mojibake_name(source.get("archive_member"))
+    if member == source.get("archive_member"):
+        return False
+    # The stored display name went through _safe_name, which already replaced
+    # the box-drawing characters, so rebuild it from the intact member path.
+    source["archive_member"] = member
+    record["name"] = _safe_name(member)
+    return True
+
+
+def _zip_member_name(info: "zipfile.ZipInfo") -> str:
+    return _fix_zip_name(info.filename, bool(info.flag_bits & 0x800))
+
+
 def _archive_reader_members(
     name: str,
     content: bytes,
@@ -2130,9 +2199,10 @@ def _archive_reader_members(
                     if len(members) >= max_members:
                         skipped += 1
                         continue
-                    safe = _safe_archive_member(info.filename)
+                    member_name = _zip_member_name(info)
+                    safe = _safe_archive_member(member_name)
                     if safe is None:
-                        errors.append(f"跳过不安全路径：{info.filename}")
+                        errors.append(f"跳过不安全路径：{member_name}")
                         continue
                     if info.is_dir():
                         continue
@@ -2659,8 +2729,9 @@ def _provider_options(context: Any) -> list[dict[str, Any]]:
     return options
 
 
-def _parse_vision_targets(config: Mapping[str, Any]) -> list[tuple[str, str]]:
-    raw = config.get("vision_model_targets", "")
+def _parse_model_targets(raw: Any) -> list[tuple[str, str]]:
+    """Parse a multi-select of ``provider::model`` entries (newline/comma list, list or mapping)."""
+
     if isinstance(raw, Mapping):
         values = [key for key, enabled in raw.items() if enabled]
     elif isinstance(raw, (list, tuple, set)):
@@ -2683,15 +2754,47 @@ def _parse_vision_targets(config: Mapping[str, Any]) -> list[tuple[str, str]]:
             provider = provider.strip()
             model = model.strip() if separator else ""
         target = (provider, model)
-        if target not in seen:
+        if target not in seen and (provider or model):
             seen.add(target)
             targets.append(target)
+    return targets
+
+
+def _parse_vision_targets(config: Mapping[str, Any]) -> list[tuple[str, str]]:
+    targets = _parse_model_targets(config.get("vision_model_targets", ""))
     if not targets:
         targets.append((
             str(config.get("vision_provider") or "").strip(),
             str(config.get("vision_model") or "").strip(),
         ))
     return targets
+
+
+def _parse_llm_review_targets(config: Mapping[str, Any]) -> list[tuple[str, str]]:
+    targets = _parse_model_targets(config.get("llm_review_targets", ""))
+    if not targets:
+        targets.append((
+            str(config.get("llm_review_provider") or "").strip(),
+            str(config.get("llm_review_model") or "").strip(),
+        ))
+    return targets
+
+
+def _model_scope_allows(record: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
+    """Vision/LLM review only runs on images and PDFs unless scope is "all"."""
+
+    if str(config.get("vision_file_scope") or "image_pdf").strip().lower() == "all":
+        return True
+    name = str(record.get("name") or "")
+    suffix = Path(name).suffix.lower()
+    mime = str(record.get("mime") or "").lower()
+    return (
+        suffix in IMAGE_EXTENSIONS
+        or suffix == ".pdf"
+        or mime.startswith("image/")
+        or mime == "application/pdf"
+        or record.get("kind") == "image"
+    )
 
 
 def _render_text_review_pages(text: str, output_dir: Path, max_pages: int) -> list[Path]:
@@ -3650,6 +3753,9 @@ class NameSearcherPlugin(Star):
         self._processing_upload_ids: set[str] = set()
         self._resume_scheduled = False
         self._terminating = False
+        self._model_review_queue: list[str] = []
+        self._model_review_task: Optional[asyncio.Task[Any]] = None
+        self._model_review_resumed = False
         self.web_app = _build_web_app(self)
         self._register_page_apis()
         self._try_register_webui()
@@ -3696,6 +3802,7 @@ class NameSearcherPlugin(Star):
         return task
 
     def _schedule_pending_uploads(self) -> None:
+        self._resume_model_reviews()
         if self._resume_scheduled or self._terminating or self._scheduled_upload_ids:
             return
         pending = [
@@ -3740,10 +3847,10 @@ class NameSearcherPlugin(Star):
         if record.get("extraction_status") not in {"extracted", "stored_only", "no_text"}:
             return False
         if _as_bool(self.config.get("vision_enabled", False)):
-            if record.get("vision_status") not in {"extracted", "no_review_pages", "unavailable"}:
+            if record.get("vision_status") not in {"extracted", "no_review_pages", "unavailable", "skipped"}:
                 return False
         if _as_bool(self.config.get("llm_review_enabled", False)):
-            if record.get("llm_review_status") not in {"completed", "unavailable"}:
+            if record.get("llm_review_status") not in {"completed", "unavailable", "skipped"}:
                 return False
         return True
 
@@ -3880,6 +3987,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/import/chunk", self._page_import_chunk, ["POST"], "Upload a recognition bundle chunk"),
             (f"/{PLUGIN_ID}/import/finish", self._page_import_finish, ["POST"], "Import an uploaded recognition bundle"),
             (f"/{PLUGIN_ID}/import/scan", self._page_import_scan, ["POST"], "Import bundles from the inbox folder"),
+            (f"/{PLUGIN_ID}/model-review", self._page_model_review, ["POST"], "Queue vision/LLM recognition for stored files"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -4009,11 +4117,135 @@ class NameSearcherPlugin(Star):
         result, status = await asyncio.to_thread(
             self.import_staged, str(payload.get("upload_id") or ""), str(payload.get("name") or "")
         )
+        if status == 200 and _as_bool(self.config.get("import_model_review", True)):
+            result["model_review"] = self.queue_model_review(result.get("record_ids") or [])
         return _page_json_response(result, status)
 
     async def _page_import_scan(self) -> Any:
         result = await asyncio.to_thread(self.import_from_inbox)
+        if _as_bool(self.config.get("import_model_review", True)):
+            ids = [rid for item in result.get("bundles", []) for rid in (item.get("record_ids") or [])]
+            result["model_review"] = self.queue_model_review(ids)
         return _page_json_response(result)
+
+    async def _page_model_review(self) -> Any:
+        payload = await _page_request_payload()
+        ids = payload.get("ids")
+        ids = [ids] if isinstance(ids, str) else ids
+        if ids is not None and not isinstance(ids, list):
+            return _page_error("ids 必须是文件编号数组")
+        force = _as_bool(payload.get("force", False))
+        return _page_json_response(self.queue_model_review(ids, force=force))
+
+    # ---------- 视觉模型 / LLM 补跑队列 ----------
+    def _model_review_needed(self, record: Mapping[str, Any], force: bool = False) -> bool:
+        if record.get("download_status") != "ok" or record.get("kind") == "archive":
+            return False
+        if not _model_scope_allows(record, self.config):
+            return False
+        path = self.store.path_for(record)
+        if not path or not path.exists():
+            return False
+        vision = _as_bool(self.config.get("vision_enabled", False))
+        review = _as_bool(self.config.get("llm_review_enabled", False))
+        if force:
+            return vision or review
+        return (
+            (vision and record.get("vision_status") not in {"extracted", "no_review_pages", "skipped"})
+            or (review and record.get("llm_review_status") not in {"completed", "skipped"})
+        )
+
+    def queue_model_review(self, ids: Optional[Iterable[Any]] = None, *, force: bool = False) -> dict[str, Any]:
+        """Queue vision-model recognition and LLM review for stored records.
+
+        ``ids`` None means every eligible record (images/PDFs by default).
+        Runs one file at a time in the background; returns how many queued.
+        """
+        vision = _as_bool(self.config.get("vision_enabled", False))
+        review = _as_bool(self.config.get("llm_review_enabled", False))
+        if not vision and not review:
+            return {"ok": False, "queued": 0, "message": "视觉模型识别和 LLM 审核都没有开启"}
+        wanted = None if ids is None else {str(item) for item in ids}
+        if wanted is not None and not wanted:
+            return {"ok": True, "queued": 0, "pending": len(self._model_review_queue)}
+        queued = 0
+        for record in reversed(self.store.list()):
+            record_id = str(record.get("id") or "")
+            if wanted is not None and record_id not in wanted:
+                continue
+            if record_id in self._model_review_queue or not self._model_review_needed(record, force):
+                continue
+            updates: dict[str, Any] = {"model_review_status": "queued", "model_review_error": ""}
+            if force:
+                updates.update({"vision_status": "", "llm_review_status": ""})
+            self.store.update(record_id, **updates)
+            self._model_review_queue.append(record_id)
+            queued += 1
+        if self._model_review_queue:
+            self._start_model_review_worker()
+        return {"ok": True, "queued": queued, "pending": len(self._model_review_queue)}
+
+    def _start_model_review_worker(self) -> None:
+        if self._model_review_task is not None and not self._model_review_task.done():
+            return
+        self._model_review_task = self._track_background_task(self._run_model_review_queue())
+
+    def _resume_model_reviews(self) -> None:
+        if self._model_review_resumed:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._model_review_resumed = True
+        pending = [
+            str(record.get("id") or "") for record in reversed(self.store.list())
+            if record.get("model_review_status") in {"queued", "running"}
+        ]
+        if pending:
+            self.queue_model_review(pending)
+
+    async def _run_model_review_queue(self) -> None:
+        event = PanelUploadEvent()
+        event.sender_name = "视觉模型补跑"
+        progress_id = ""
+        try:
+            while self._model_review_queue and not self._terminating:
+                if not progress_id:
+                    progress_id = self._start_progress(event, [], status="running")
+                    self._update_progress(progress_id, advance=False, stage="vision_review", kind="model_review")
+                record_id = self._model_review_queue[0]
+                record = self.store.get(record_id)
+                with self._progress_lock:
+                    progress = self._progress_runs.get(progress_id)
+                    if progress is not None:
+                        progress["total"] = int(progress.get("completed") or 0) + len(self._model_review_queue)
+                if record is None:
+                    self._model_review_queue.pop(0)
+                    continue
+                name = str(record.get("name") or record_id)
+                self.store.update(record_id, model_review_status="running")
+                self._update_progress(progress_id, advance=False, status="running", stage="vision_review", stage_percent=5, current_file=name, current_model="")
+                path = self.store.path_for(record)
+                mime = str(record.get("mime") or (path and _mime_for(path)) or "")
+                candidate = AttachmentCandidate(
+                    name=name, kind=str(record.get("kind") or "file"), mime=mime,
+                    value=str(path or ""), source=dict(record.get("source") or {}), type_hint="model-review",
+                )
+                try:
+                    record = await self._apply_vision_model(event, candidate, record, progress_id=progress_id)
+                    self._update_progress(progress_id, advance=False, stage="llm_review", stage_percent=90, current_file=name, current_model="")
+                    record = await self._apply_llm_review(event, record)
+                    self.store.update(record_id, model_review_status="completed", model_review_at=_now())
+                except Exception as exc:  # 一个文件失败不影响其余
+                    _log("warning", "NameSearcher model review failed for %s: %s", name, exc)
+                    self.store.update(record_id, model_review_status="failed", model_review_error=str(exc)[:500])
+                self._model_review_queue.pop(0)
+                self._update_progress(progress_id, record=self.store.get(record_id) or record, advance=True)
+            if progress_id:
+                self._update_progress(progress_id, advance=False, status="completed", stage="completed", current_file="", current_model="")
+        finally:
+            self._model_review_task = None
 
     async def _page_file_preview(self, artifact_id: str) -> Any:
         payload, status = _preview_payload(self.store, artifact_id)
@@ -4201,6 +4433,11 @@ class NameSearcherPlugin(Star):
     ) -> dict[str, Any]:
         if not _as_bool(self.config.get("vision_enabled", False)) or record.get("download_status") != "ok":
             return record
+        if not _model_scope_allows(record, self.config):
+            if record.get("vision_status") != "skipped":
+                self.store.update(record["id"], vision_status="skipped")
+                record["vision_status"] = "skipped"
+            return record
         path = self.store.path_for(record)
         if not path or not path.exists():
             return record
@@ -4338,47 +4575,101 @@ class NameSearcherPlugin(Star):
         return record
 
     async def _apply_llm_review(self, event: Any, record: dict[str, Any]) -> dict[str, Any]:
-        """Audit extracted text with the configured AstrBot text model.
+        """Audit extracted text with one or more AstrBot text models.
 
-        The original local/vision output is retained for diagnostics. The
-        reviewed text becomes the searchable value because the model prompt
-        explicitly asks for concise corrected text.
+        Every selected model reviews the text; with several successful
+        reviews a consensus call (first model) merges them.  The original
+        local/vision output is retained for diagnostics and the reviewed text
+        becomes the searchable value.
         """
         if not _as_bool(self.config.get("llm_review_enabled", False)):
+            return record
+        if not _model_scope_allows(record, self.config):
+            if record.get("llm_review_status") != "skipped":
+                self.store.update(record["id"], llm_review_status="skipped")
+                record["llm_review_status"] = "skipped"
             return record
         original = str(record.get("ocr_text") or "").strip()
         if not original and record.get("download_status") == "ok":
             return record
+        name = str(record.get("name") or "未命名文件")
         template = str(self.config.get("llm_review_prompt") or DEFAULT_CONFIG["llm_review_prompt"])
         try:
-            prompt = template.format(name=str(record.get("name") or "未命名文件"), text=original[:200000])
+            prompt = template.format(name=name, text=original[:200000])
         except Exception:
-            prompt = f"请审核文件 {record.get('name') or '未命名文件'} 的识别结果并输出可检索文本：\n{original[:200000]}"
+            prompt = f"请审核文件 {name} 的识别结果并输出可检索文本：\n{original[:200000]}"
         source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
         session_id = str(source.get("unified_msg_origin") or source.get("message_id") or "name-searcher-review")
-        try:
-            reviewed, engine = await _call_text_model(
-                self.context,
-                prompt,
-                provider_name=str(self.config.get("llm_review_provider") or "").strip(),
-                model_name=str(self.config.get("llm_review_model") or "").strip(),
-                timeout=int(self.config.get("llm_review_timeout_seconds", 60) or 60),
-                session_id=session_id,
-            )
-        except Exception as exc:
-            _log("debug", "LLM review failed: %s", exc)
-            reviewed, engine = "", ""
-        if not reviewed:
-            updates = {"llm_review_status": "unavailable", "llm_review_engine": engine}
+        timeout = int(self.config.get("llm_review_timeout_seconds", 60) or 60)
+        results: list[dict[str, Any]] = []
+        for provider_name, model_name in _parse_llm_review_targets(self.config):
+            label = "::".join(part for part in (provider_name, model_name) if part) or "当前会话默认模型"
+            try:
+                reviewed, engine = await _call_text_model(
+                    self.context,
+                    prompt,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                    timeout=timeout,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                _log("debug", "LLM review failed (%s): %s", label, exc)
+                reviewed, engine = "", ""
+            results.append({
+                "provider": provider_name,
+                "model": model_name,
+                "label": label,
+                "status": "completed" if reviewed else "unavailable",
+                "text": str(reviewed or "")[:200000],
+                "engine": engine,
+            })
+        successful = [item for item in results if item.get("text")]
+        if not successful:
+            updates = {
+                "llm_review_status": "unavailable",
+                "llm_review_engine": ", ".join(str(item.get("engine") or "") for item in results if item.get("engine")),
+                "llm_review_results": results,
+            }
             self.store.update(record["id"], **updates)
             record.update(updates)
             return record
+        reviewed = str(successful[0]["text"])
+        engine = str(successful[0].get("engine") or "")
+        consensus_status = "single_result"
+        if len(successful) > 1:
+            reviewed = max((str(item["text"]) for item in successful), key=len)
+            evidence = "\n\n".join(f"[{item['label']}]\n{item['text']}" for item in successful)
+            consensus_prompt = (
+                str(self.config.get("llm_review_consensus_prompt") or DEFAULT_CONFIG["llm_review_consensus_prompt"])
+                + f"\n\n文件名：{name}\n\n[原识别结果]\n{original[:200000]}\n\n{evidence}"
+            )[:600000]
+            first = successful[0]
+            try:
+                merged, merged_engine = await _call_text_model(
+                    self.context,
+                    consensus_prompt,
+                    provider_name=str(first.get("provider") or ""),
+                    model_name=str(first.get("model") or ""),
+                    timeout=timeout,
+                    session_id=f"{session_id}-review-consensus",
+                )
+            except Exception as exc:
+                _log("debug", "LLM review consensus failed: %s", exc)
+                merged, merged_engine = "", ""
+            if merged:
+                reviewed, engine, consensus_status = merged, merged_engine, "completed"
+            else:
+                consensus_status = "unavailable"
         updates = {
             "ocr_text_before_llm_review": original[:200000],
             "ocr_text": reviewed[:200000],
             "llm_review_text": reviewed[:200000],
             "llm_review_status": "completed",
             "llm_review_engine": engine,
+            "llm_review_results": results,
+            "llm_review_models_completed": len(successful),
+            "llm_review_consensus_status": consensus_status,
             "ocr_engine": "llm-review",
             "ocr_confidence": max(float(record.get("ocr_confidence") or 0), 0.9),
             "extraction_status": "extracted" if reviewed.strip() else record.get("extraction_status"),

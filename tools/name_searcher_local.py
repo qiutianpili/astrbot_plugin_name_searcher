@@ -3,14 +3,18 @@
 在自己的电脑上用和插件完全相同的识别代码处理一个文件夹，然后打包成
 “识别包”，到插件页点“导入识别包”即可。服务器只做校验和写索引，不再跑 OCR。
 
+每次识别都是独立的一次：结果放在 工作目录/runs/时间/ 下，打包只包含本次的文件，
+不会把以前识别过的文件再打进去。
+
 用法：
-    python name_searcher_local.py run  <文件夹>      识别并打包（最常用）
-    python name_searcher_local.py scan <文件夹>      只识别（可随时中断，重跑会自动跳过已完成的文件）
-    python name_searcher_local.py pack               把已识别的结果打包
-    python name_searcher_local.py status             查看工作目录里的识别情况
+    python name_searcher_local.py run  <文件或文件夹>...   识别并打包（最常用，可同时给多个文件/文件夹）
+    python name_searcher_local.py scan <文件或文件夹>...   只识别
+    python name_searcher_local.py pack                    把最近一次的识别结果打包（--run 指定某一次）
+    python name_searcher_local.py status                  查看最近一次的识别情况
 
 常用参数：
     --work DIR        工作目录（默认：本工具旁边的 ns_local_work）
+    --run DIR         pack/status 时指定某一次识别的目录（默认最近一次）
     --out FILE        识别包输出路径（默认：工作目录下 bundle-时间.zip）
     --lang LANG       Tesseract 语言（默认 chi_sim+eng；RapidOCR 不受影响）
     --max-mb N        单文件大小上限（默认 200 MB）
@@ -48,9 +52,31 @@ def _console_utf8() -> None:
             pass
 
 
-def _plugin(work: Path, args: argparse.Namespace) -> "ns.NameSearcherPlugin":
+def _new_run(work: Path) -> Path:
+    """为本次识别新建独立目录：work/runs/YYYYmmdd-HHMMSS[-n]。"""
+    base = work / "runs" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    run = base
+    index = 1
+    while run.exists():
+        index += 1
+        run = base.with_name(f"{base.name}-{index}")
+    run.mkdir(parents=True)
+    return run
+
+
+def _latest_run(work: Path) -> Path | None:
+    runs = work / "runs"
+    candidates = sorted((p for p in runs.glob("*") if (p / "store").is_dir()), key=lambda p: p.name) if runs.is_dir() else []
+    if candidates:
+        return candidates[-1]
+    if (work / "store").is_dir():  # 1.7.x 旧版工作目录
+        return work
+    return None
+
+
+def _plugin(run: Path, args: argparse.Namespace) -> "ns.NameSearcherPlugin":
     config = {
-        "storage_dir": str((work / "store").resolve()),
+        "storage_dir": str((run / "store").resolve()),
         "people_file": "",
         "restrict_chat_scope": False,
         "ocr_lang": args.lang,
@@ -67,29 +93,60 @@ def _plugin(work: Path, args: argparse.Namespace) -> "ns.NameSearcherPlugin":
     return ns.NameSearcherPlugin(object(), config)
 
 
-def _iter_files(folder: Path):
-    for path in sorted(folder.rglob("*")):
-        if path.is_file() and path.name.lower() not in SKIP_NAMES and not path.name.startswith("~$"):
-            yield path
+def _wanted(path: Path) -> bool:
+    return path.is_file() and path.name.lower() not in SKIP_NAMES and not path.name.startswith("~$")
 
 
-async def _scan(folder: Path, work: Path, args: argparse.Namespace, log=print, progress=None, should_stop=None) -> int:
-    """识别 folder 里的文件。progress(index, total, status) 每个文件后调用；should_stop() 为真时在文件之间停下，返回 130。"""
-    plugin = _plugin(work, args)
-    files = list(_iter_files(folder))
+def _collect(inputs) -> list[tuple[Path, str]]:
+    """把文件和文件夹展开成 (文件, 相对路径) 列表，去重并保持顺序。"""
+    if isinstance(inputs, (str, Path)):
+        inputs = [inputs]
+    seen: set[str] = set()
+    files: list[tuple[Path, str]] = []
+    for item in inputs:
+        item = Path(item).expanduser()
+        if item.is_dir():
+            pairs = [(p, f"{item.name}/{p.relative_to(item).as_posix()}") for p in sorted(item.rglob("*")) if _wanted(p)]
+        elif _wanted(item):
+            pairs = [(item, item.name)]
+        else:
+            pairs = []
+        for path, relative in pairs:
+            key = str(path.resolve()).lower() if os.name == "nt" else str(path.resolve())
+            if key not in seen:
+                seen.add(key)
+                files.append((path, relative))
+    return files
+
+
+def _label_for(inputs) -> str:
+    if isinstance(inputs, (str, Path)):
+        inputs = [inputs]
+    paths = [Path(p) for p in inputs]
+    if len(paths) == 1:
+        return paths[0].stem if paths[0].is_file() else paths[0].name
+    return f"{paths[0].stem if paths[0].is_file() else paths[0].name} 等 {len(paths)} 项" if paths else ""
+
+
+async def _scan(inputs, run: Path, args: argparse.Namespace, log=print, progress=None, should_stop=None) -> int:
+    """识别 inputs（文件和/或文件夹）到本次识别目录 run。
+
+    progress(index, total, status) 每个文件后调用；should_stop() 为真时在文件之间停下，返回 130。
+    """
+    plugin = _plugin(run, args)
+    files = _collect(inputs)
     if not files:
-        log(f"{folder} 里没有文件")
+        log("没有可识别的文件")
         return 1
     run_id = datetime.now().strftime("%Y%m%d%H%M%S")
     event = ns.PanelUploadEvent()
     started = time.time()
     failed = 0
-    log(f"共 {len(files)} 个文件，工作目录 {work}")
-    for index, path in enumerate(files, 1):
+    log(f"共 {len(files)} 个文件，本次识别目录 {run}")
+    for index, (path, relative) in enumerate(files, 1):
         if should_stop and should_stop():
-            log(f"已停止：完成 {index - 1}/{len(files)}。再次开始会跳过已完成的文件。")
+            log(f"已停止：完成 {index - 1}/{len(files)}。可点“打包本次结果”只打包已完成的部分。")
             return 130
-        relative = path.relative_to(folder).as_posix()
         source = {
             "sender_id": "local-tool",
             "sender_name": "本地识别工具",
@@ -133,12 +190,14 @@ async def _scan(folder: Path, work: Path, args: argparse.Namespace, log=print, p
     return 0
 
 
-def _pack(work: Path, out: Path | None, label: str = "", log=print) -> Path:
-    store = ns.ArtifactStore(work / "store")
+def _pack(run: Path, out: Path | None, label: str = "", log=print) -> Path:
+    """只打包 run（某一次识别）里的文件。识别包默认放在工作目录下。"""
+    store = ns.ArtifactStore(run / "store")
     records = [item for item in store.list() if item.get("download_status") == "ok" and item.get("path")]
     if not records:
-        raise SystemExit("工作目录里还没有识别结果，先运行 scan")
-    out = out or work / f"bundle-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        raise SystemExit("这次识别还没有结果，先运行 scan")
+    work = run.parent.parent if run.parent.name == "runs" else run
+    out = out or work / f"bundle-{run.name if run is not work else datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
     out.parent.mkdir(parents=True, exist_ok=True)
     manifest_records = []
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
@@ -166,26 +225,29 @@ def _pack(work: Path, out: Path | None, label: str = "", log=print) -> Path:
     return out
 
 
-def _status_counts(work: Path) -> dict[str, int]:
-    store = ns.ArtifactStore(work / "store")
+def _status_counts(run: Path | None) -> dict[str, int]:
     counts: dict[str, int] = {}
+    if run is None or not (run / "store").is_dir():
+        return counts
+    store = ns.ArtifactStore(run / "store")
     for item in store.list():
         key = str(item.get("extraction_status") or item.get("download_status"))
         counts[key] = counts.get(key, 0) + 1
     return counts
 
 
-def _status(work: Path) -> None:
-    counts = _status_counts(work)
-    print(json.dumps({"工作目录": str(work), "文件数": sum(counts.values()), "状态": counts}, ensure_ascii=False, indent=2))
+def _status(run: Path | None) -> None:
+    counts = _status_counts(run)
+    print(json.dumps({"识别目录": str(run or "无"), "文件数": sum(counts.values()), "状态": counts}, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
     _console_utf8()
     parser = argparse.ArgumentParser(description="NameSearcher 本地识别工具")
     parser.add_argument("command", choices=["run", "scan", "pack", "status"])
-    parser.add_argument("folder", nargs="?")
+    parser.add_argument("inputs", nargs="*", help="要识别的文件或文件夹，可以给多个")
     parser.add_argument("--work", default=str(HERE / "ns_local_work"))
+    parser.add_argument("--run", help="pack/status 时指定某一次识别的目录")
     parser.add_argument("--out")
     parser.add_argument("--lang", default="chi_sim+eng")
     parser.add_argument("--max-mb", type=float, default=200)
@@ -194,24 +256,29 @@ def main(argv: list[str] | None = None) -> int:
     work = Path(args.work).expanduser().resolve()
     work.mkdir(parents=True, exist_ok=True)
     if args.command in {"run", "scan"}:
-        if not args.folder:
-            parser.error("请给出要识别的文件夹")
-        folder = Path(args.folder).expanduser().resolve()
-        if not folder.is_dir():
-            parser.error(f"{folder} 不是文件夹")
+        if not args.inputs:
+            parser.error("请给出要识别的文件或文件夹")
+        inputs = [Path(item).expanduser().resolve() for item in args.inputs]
+        missing = [str(item) for item in inputs if not item.exists()]
+        if missing:
+            parser.error("找不到：" + "，".join(missing))
+        run = _new_run(work)
         try:
-            code = asyncio.run(_scan(folder, work, args))
+            code = asyncio.run(_scan(inputs, run, args))
         except KeyboardInterrupt:
-            print("\n已中断。重新运行同样的命令会跳过已完成的文件。")
+            print(f"\n已中断。可运行 pack --run \"{run}\" 打包已完成的部分。")
             return 130
         if code or args.command == "scan":
             return code
-        _pack(work, Path(args.out) if args.out else None, folder.name)
+        _pack(run, Path(args.out) if args.out else None, _label_for(inputs))
         return 0
+    run = Path(args.run).expanduser().resolve() if args.run else _latest_run(work)
     if args.command == "pack":
-        _pack(work, Path(args.out) if args.out else None)
+        if run is None:
+            raise SystemExit("还没有识别记录，先运行 run 或 scan")
+        _pack(run, Path(args.out) if args.out else None)
         return 0
-    _status(work)
+    _status(run)
     return 0
 
 

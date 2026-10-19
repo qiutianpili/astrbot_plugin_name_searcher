@@ -75,7 +75,7 @@ PATCH /config
 
 `admin_only_capture` 开启后，插件只捕获 `admin_ids` 中用户发送的附件。多个管理员 ID 可用逗号、分号、空格或换行分隔；管理员列表为空时不会捕获任何文件。此限制只作用于文件捕获，不会额外限制 `/查找` 等命令。
 
-`capture_window_enabled` 控制时间窗口捕获，`capture_interval_seconds` 默认 30 秒。`vision_model_targets` 可写多行 `provider::model`；`vision_review_max_pages` 限制每份文件送审页数，`vision_consensus_enabled` 控制多个模型结果的共识审核。
+`capture_window_enabled` 控制时间窗口捕获，`capture_interval_seconds` 默认 30 秒。`vision_model_targets` 和 `llm_review_targets` 都可写多行 `provider::model`（插件页可直接多选）；多个审核模型时由第一个模型按 `llm_review_consensus_prompt` 汇总。`vision_file_scope` 默认 `image_pdf`，视觉识别和 LLM 审核只处理图片和 PDF，改成 `all` 则处理所有文件；`vision_review_max_pages` 限制每份文件送审页数，`vision_consensus_enabled` 控制多个模型结果的共识审核。
 
 `notify_encoding_issues` 控制乱码文件通告。开启时，一次捕获批次中检测到的非 UTF-8 或乱码文件会汇总发送给查询发起人，列明文件名、源编码和修复方式；关闭仅停止通告，自动转码与识别仍会继续。
 
@@ -85,21 +85,28 @@ PATCH /config
 
 查找视觉模型输出时会兼容 Markdown 包裹、HTML 实体、零宽字符、全半角差异、姓名间标点和 `\\uXXXX` 转义文本。上述处理只生成搜索键，面板及索引中仍保留模型原始输出，便于核对。
 
+## 1.8.0 更新
+
+- 修复压缩包内中文文件名乱码（如 `2024_º_9_Ñ.xlsx`）：WinRAR、360 等按 GBK 写入且没有 UTF-8 标记的 ZIP 成员名会自动识别为 GBK/UTF-8；已存的乱码文件名在插件启动时自动修复。
+- LLM 审核支持多选模型，多个结果自动汇总；视觉识别和 LLM 审核默认只处理图片和 PDF。
+- 导入识别包后自动在后台补跑视觉模型识别和 LLM 审核；插件页新增“补跑模型识别”。
+- 本地识别工具：每次识别独立打包，不再累计上次的文件；支持多选单个文件。
+
 ## 本地识别 + 导入识别包（1.7.0 起）
 
 服务器配置低（例如 1 核 2GB 还跑着 NapCat）时，大批量文件不要直接让服务器识别。改为：
 
 1. 在自己的电脑上准备 Python 3.10+，下载 `NameSearcher-local` 工具包并安装依赖：`pip install -r requirements-local.txt`
-2. 双击 `本地识别GUI.bat` 打开图形界面，选文件夹点“识别并打包”（有进度条、停止、状态查看，缺依赖可一键安装）；或命令行运行 `python name_searcher_local.py run D:\要识别的文件夹`（也可以把文件夹拖到 `本地识别.bat` 上）。
+2. 双击 `本地识别GUI.bat` 打开图形界面，用“添加文件…”（可多选）或“添加文件夹…”放入要识别的内容，点“识别并打包”（有进度条、停止、状态查看，缺依赖可一键安装）；或命令行运行 `python name_searcher_local.py run D:\文件夹 D:\单个文件.pdf`（也可以把文件或文件夹拖到 `本地识别.bat` 上）。
    - 用的是和插件完全相同的识别代码（RapidOCR、PDF/Office/表格解析、压缩包展开）。
-   - 可以随时 Ctrl+C 中断；重跑同一命令会跳过已识别的文件。
+   - 1.8.0 起每次识别都是独立的：结果放在 `ns_local_work/runs/时间/`，识别包只含本次的文件，不会把上次识别过的文件再打进去。中途停止后可以“打包本次结果”。
 3. 结束后生成 `bundle-时间.zip`。打开插件页，点“导入识别包”选择它。
    - 识别包按 2MB 分片上传，服务器逐个文件校验 sha256 后写入，索引只写一次，不做 OCR。
    - 重复文件不会重复导入；服务器上没识别完的同一文件会直接用识别包里的结果补全。
    - 很大的识别包也可以用 SFTP 放进存储目录下的 `import_inbox/`，再点“扫描导入目录”。导入完成的包会移到 `import_inbox/done/`。
 4. 来源筛选里选“本地识别导入”可以只看这些文件。
 
-本地工具不会调用 AstrBot 的视觉模型和 LLM 审核（那些依赖 AstrBot 的模型提供商）。
+本地工具不会调用 AstrBot 的视觉模型和 LLM 审核（那些依赖 AstrBot 的模型提供商）。1.8.0 起，导入后由插件在后台补跑：开启 `import_model_review`（默认开）且开启了视觉识别或 LLM 审核时，识别包里的图片和 PDF 会逐个交给所选视觉模型识别，再由所选 LLM 审核修正；已有文件可在插件页点“补跑模型识别”（勾选文件则只补跑选中的）。
 
 服务器端同时加了三层保护：
 - RapidOCR 只用 1 个线程；

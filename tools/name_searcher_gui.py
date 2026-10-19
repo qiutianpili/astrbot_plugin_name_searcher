@@ -1,7 +1,8 @@
 """NameSearcher 本地识别工具 · 图形界面。
 
 双击“本地识别GUI.bat”（或 pythonw name_searcher_gui.py）打开。
-选文件夹 → 开始识别 → 完成后得到识别包 zip → 到 AstrBot 插件页“导入识别包”。
+添加文件或文件夹 → 识别并打包 → 得到识别包 zip → 到 AstrBot 插件页“导入识别包”。
+每次识别都是独立的，识别包只含本次添加的文件。
 识别逻辑与命令行工具 name_searcher_local.py 完全相同。
 """
 
@@ -60,13 +61,14 @@ def _open_path(path: Path) -> None:
 
 
 class App:
-    def __init__(self, root: tk.Tk, initial_folder: str = "") -> None:
+    def __init__(self, root: tk.Tk, initial_inputs: list[str] | None = None) -> None:
         self.root = root
         self.tool = None  # name_searcher_local 模块，后台加载
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.last_bundle: Path | None = None
+        self.last_run: Path | None = None
         self.closing = False
         settings = _load_settings()
 
@@ -78,7 +80,9 @@ class App:
         except tk.TclError:
             pass
 
-        self.folder = tk.StringVar(value=initial_folder or settings.get("folder", ""))
+        # 单次识别：每次打开都从空列表开始，不沿用上次的文件
+        self.inputs: list[str] = [p for p in (initial_inputs or []) if Path(p).exists()]
+        self.last_dir = settings.get("last_dir", "")
         self.work = tk.StringVar(value=settings.get("work", str(HERE / "ns_local_work")))
         self.lang = tk.StringVar(value=settings.get("lang", "chi_sim+eng"))
         self.max_mb = tk.StringVar(value=str(settings.get("max_mb", 200)))
@@ -87,12 +91,22 @@ class App:
         self.count_text = tk.StringVar(value="")
 
         pad = {"padx": 10, "pady": 4}
-        box = ttk.LabelFrame(root, text="要识别的文件夹")
+        box = ttk.LabelFrame(root, text="要识别的文件 / 文件夹（本次）")
         box.pack(fill="x", **pad)
         row = ttk.Frame(box)
         row.pack(fill="x", padx=8, pady=6)
-        ttk.Entry(row, textvariable=self.folder).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="选择…", command=self.pick_folder).pack(side="left", padx=(6, 0))
+        self.input_list = tk.Listbox(row, height=5, selectmode="extended", activestyle="none")
+        list_scroll = ttk.Scrollbar(row, command=self.input_list.yview)
+        self.input_list.configure(yscrollcommand=list_scroll.set)
+        self.input_list.pack(side="left", fill="x", expand=True)
+        list_scroll.pack(side="left", fill="y")
+        side = ttk.Frame(row)
+        side.pack(side="left", padx=(6, 0), anchor="n")
+        ttk.Button(side, text="添加文件…", command=self.pick_files).pack(fill="x")
+        ttk.Button(side, text="添加文件夹…", command=self.pick_folder).pack(fill="x", pady=(4, 0))
+        ttk.Button(side, text="移除选中", command=self.remove_selected).pack(fill="x", pady=(4, 0))
+        ttk.Button(side, text="清空", command=self.clear_inputs).pack(fill="x", pady=(4, 0))
+        self.refresh_inputs()
 
         opts = ttk.LabelFrame(root, text="选项")
         opts.pack(fill="x", **pad)
@@ -115,7 +129,7 @@ class App:
         actions.pack(fill="x", **pad)
         self.btn_run = ttk.Button(actions, text="▶ 识别并打包", command=lambda: self.start("run"))
         self.btn_scan = ttk.Button(actions, text="只识别", command=lambda: self.start("scan"))
-        self.btn_pack = ttk.Button(actions, text="打包已识别结果", command=lambda: self.start("pack"))
+        self.btn_pack = ttk.Button(actions, text="打包本次结果", command=lambda: self.start("pack"))
         self.btn_status = ttk.Button(actions, text="查看状态", command=lambda: self.start("status"))
         self.btn_stop = ttk.Button(actions, text="■ 停止", command=self.stop, state="disabled")
         self.btn_bundle = ttk.Button(actions, text="打开识别包位置", command=self.open_bundle, state="disabled")
@@ -143,7 +157,7 @@ class App:
         self.log_widget.tag_configure("err", foreground="#c0392b")
         self.log_widget.tag_configure("ok", foreground="#1e8449")
 
-        hint = "完成后到 AstrBot 的 NameSearcher 插件页点“导入识别包”，选生成的 zip。可随时停止，下次会跳过已完成的文件。"
+        hint = "每次识别都是独立的，识别包只含本次列表里的文件。完成后到 AstrBot 的 NameSearcher 插件页点“导入识别包”，选生成的 zip。中途停止后可点“打包本次结果”。"
         ttk.Label(root, text=hint, foreground="#666", wraplength=720).pack(fill="x", padx=12, pady=(0, 8))
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -203,10 +217,42 @@ class App:
             button.configure(state="disabled" if busy or self.tool is None else "normal")
         self.btn_stop.configure(state="normal" if busy and allow_stop else "disabled")
 
+    def _start_dir(self) -> str:
+        return self.last_dir or (str(Path(self.inputs[-1]).parent) if self.inputs else str(Path.home()))
+
+    def add_inputs(self, paths) -> None:
+        for path in paths:
+            path = str(Path(path))
+            if path and path not in self.inputs:
+                self.inputs.append(path)
+        self.refresh_inputs()
+
+    def refresh_inputs(self) -> None:
+        self.input_list.delete(0, "end")
+        for path in self.inputs:
+            mark = "📁 " if Path(path).is_dir() else "📄 "
+            self.input_list.insert("end", mark + path)
+
+    def pick_files(self) -> None:
+        paths = filedialog.askopenfilenames(title="选择要识别的文件（可多选）", initialdir=self._start_dir())
+        if paths:
+            self.last_dir = str(Path(paths[0]).parent)
+            self.add_inputs(paths)
+
     def pick_folder(self) -> None:
-        path = filedialog.askdirectory(title="选择要识别的文件夹", initialdir=self.folder.get() or str(Path.home()))
+        path = filedialog.askdirectory(title="选择要识别的文件夹", initialdir=self._start_dir())
         if path:
-            self.folder.set(path)
+            self.last_dir = str(Path(path).parent)
+            self.add_inputs([path])
+
+    def remove_selected(self) -> None:
+        for index in sorted(self.input_list.curselection(), reverse=True):
+            del self.inputs[index]
+        self.refresh_inputs()
+
+    def clear_inputs(self) -> None:
+        self.inputs.clear()
+        self.refresh_inputs()
 
     def pick_work(self) -> None:
         path = filedialog.askdirectory(title="选择工作目录", initialdir=self.work.get() or str(HERE))
@@ -228,7 +274,7 @@ class App:
 
     def remember(self) -> None:
         _save_settings({
-            "folder": self.folder.get(),
+            "last_dir": self.last_dir,
             "work": self.work.get(),
             "lang": self.lang.get(),
             "max_mb": self.max_mb.get(),
@@ -253,13 +299,12 @@ class App:
         if args is None:
             return
         work = Path(self.work.get()).expanduser().resolve()
-        folder = None
+        inputs: list[Path] = []
         if command in {"run", "scan"}:
-            folder = Path(self.folder.get()).expanduser()
-            if not self.folder.get().strip() or not folder.is_dir():
-                messagebox.showwarning("没有文件夹", "请先选择要识别的文件夹")
+            inputs = [Path(p).expanduser().resolve() for p in self.inputs if Path(p).expanduser().exists()]
+            if not inputs:
+                messagebox.showwarning("没有文件", "请先添加要识别的文件或文件夹")
                 return
-            folder = folder.resolve()
         self.remember()
         work.mkdir(parents=True, exist_ok=True)
         self.stop_flag.clear()
@@ -268,20 +313,23 @@ class App:
         self.tally = {}
         self.status_text.set({"run": "正在识别…", "scan": "正在识别…", "pack": "正在打包…", "status": "正在读取…"}[command])
         self.set_busy(True, allow_stop=command in {"run", "scan"})
-        self.worker = threading.Thread(target=self.job, args=(command, folder, work, args), daemon=True)
+        self.worker = threading.Thread(target=self.job, args=(command, inputs, work, args), daemon=True)
         self.worker.start()
 
-    def job(self, command: str, folder: Path | None, work: Path, args: argparse.Namespace) -> None:
+    def job(self, command: str, inputs: list[Path], work: Path, args: argparse.Namespace) -> None:
         tool = self.tool
         put = self.events.put
         log = lambda text: put(("log", text, "err" if "✗" in text else ""))  # noqa: E731
         try:
+            run = self.last_run if self.last_run and self.last_run.exists() and work in self.last_run.parents else tool._latest_run(work)
             if command == "status":
-                put(("status", tool._status_counts(work), str(work)))
+                put(("status", tool._status_counts(run), str(run or work)))
                 return
             if command in {"run", "scan"}:
+                run = tool._new_run(work)
+                self.last_run = run
                 code = asyncio.run(tool._scan(
-                    folder, work, args, log=log,
+                    inputs, run, args, log=log,
                     progress=lambda i, n, s: put(("progress", i, n, s)),
                     should_stop=self.stop_flag.is_set,
                 ))
@@ -291,8 +339,12 @@ class App:
                 if code or command == "scan":
                     put(("done", "识别完成" if not code else "没有可识别的文件", None))
                     return
-            label = folder.name if folder else ""
-            bundle = tool._pack(work, None, label, log=log)
+            if run is None:
+                put(("log", "还没有识别记录，先点“识别并打包”或“只识别”。", "err"))
+                put(("done", "未完成", None))
+                return
+            label = tool._label_for(inputs) if inputs else ""
+            bundle = tool._pack(run, None, label, log=log)
             put(("done", "完成，识别包已生成", bundle))
         except SystemExit as exc:
             put(("log", str(exc), "err"))
@@ -308,7 +360,7 @@ class App:
 
     def on_close(self) -> None:
         if self.worker and self.worker.is_alive():
-            if not messagebox.askyesno("正在识别", "还在识别中。停止并退出吗？\n（会等当前文件处理完，已完成的不会丢）"):
+            if not messagebox.askyesno("正在识别", "还在识别中。停止并退出吗？\n（会等当前文件处理完）"):
                 return
             self.closing = True
             self.stop()
@@ -336,7 +388,7 @@ class App:
             self.tool = event[1]
             self.status_text.set("就绪")
             self.set_busy(False)
-            self.log("识别引擎已加载。选择文件夹后点“识别并打包”。", "ok")
+            self.log("识别引擎已加载。添加文件或文件夹后点“识别并打包”。", "ok")
         elif kind == "engine_missing":
             self.status_text.set("缺少依赖")
             self.log(f"缺少依赖：{event[1]}", "err")
@@ -369,7 +421,7 @@ class App:
             counts, work = event[1], event[2]
             total = sum(counts.values())
             parts = "，".join(f"{STATUS_NAMES.get(k, k)} {v}" for k, v in counts.items()) or "无"
-            self.log(f"工作目录 {work}：共 {total} 个文件（{parts}）")
+            self.log(f"本次识别 {work}：共 {total} 个文件（{parts}）")
             self.status_text.set("就绪")
             self.set_busy(False)
         elif kind == "done":
@@ -377,6 +429,8 @@ class App:
             self.status_text.set(message)
             self.set_busy(False)
             if bundle:
+                self.inputs.clear()  # 本次已打包，清空列表，下次重新添加
+                self.refresh_inputs()
                 self.last_bundle = Path(bundle)
                 self.btn_bundle.configure(state="normal")
                 self.bar.configure(value=self.bar["maximum"])
@@ -387,8 +441,8 @@ class App:
 
 def main() -> None:
     root = tk.Tk()
-    initial = sys.argv[1] if len(sys.argv) > 1 and Path(sys.argv[1]).is_dir() else ""
-    App(root, initial)
+    initial = [arg for arg in sys.argv[1:] if Path(arg).exists()]
+    App(root, initial or None)
     root.mainloop()
 
 
