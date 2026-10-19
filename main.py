@@ -1226,7 +1226,19 @@ def _image_clarity(image: Any) -> float:
 
 def _rapid_result_to_data(result: Any) -> dict[str, list[Any]]:
     detections: list[tuple[int, int, str, float, int, int]] = []
-    for item in result or []:
+    items: list[Any] = []
+    if result is not None:
+        if isinstance(result, tuple) and len(result) >= 1 and (hasattr(result[0], "boxes") or isinstance(result[0], list)):
+            result = result[0]
+        if hasattr(result, "boxes") and hasattr(result, "txts") and hasattr(result, "scores"):
+            boxes = result.boxes if result.boxes is not None else []
+            txts = result.txts if result.txts is not None else []
+            scores = result.scores if result.scores is not None else []
+            items = list(zip(boxes, txts, scores))
+        elif isinstance(result, (list, tuple)):
+            items = list(result)
+
+    for item in items:
         try:
             box, text, score = item[0], str(item[1]).strip(), float(item[2])
             if not text:
@@ -1288,7 +1300,10 @@ def _run_rapid_ocr(image: Any) -> dict[str, list[Any]]:
     with _RAPID_OCR_LOCK:
         if _RAPID_OCR_ENGINE is None:
             try:
-                from rapidocr_onnxruntime import RapidOCR  # type: ignore
+                try:
+                    from rapidocr import RapidOCR  # type: ignore
+                except ImportError:
+                    from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
                 try:
                     # Keep ONNX to one worker thread so a 1-core server stays responsive.
@@ -1454,7 +1469,10 @@ def _read_text_from_file(
             if text.strip():
                 return text, 0.9
             try:
-                import fitz  # type: ignore
+                try:
+                    import pymupdf as fitz  # type: ignore
+                except ImportError:
+                    import fitz  # type: ignore
                 from PIL import Image  # type: ignore
 
                 page_text: list[str] = []
@@ -2737,7 +2755,10 @@ def _prepare_vision_review_images(
     max_pages = max(1, min(12, int(max_pages or 4)))
     if suffix == ".pdf":
         try:
-            import fitz  # type: ignore
+            try:
+                import pymupdf as fitz  # type: ignore
+            except ImportError:
+                import fitz  # type: ignore
 
             images: list[Path] = []
             document = fitz.open(str(path))
