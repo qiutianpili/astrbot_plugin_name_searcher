@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.10"
+PLUGIN_VERSION = "1.9.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -197,6 +197,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "capture_progress_notify": True,
     "forward_file_timeout_seconds": 15,
     "forward_images_only": True,
+    "paused": False,
     "notify_encoding_issues": True,
     "notify_archive_limits": True,
     "archive_extraction_enabled": True,
@@ -3772,13 +3773,13 @@ def _progress_text(progress: Optional[Mapping[str, Any]]) -> str:
     total = int(progress.get("total") or 0)
     status = str(progress.get("status") or "unknown")
     status_name = {
-        "queued": "已排队", "collecting": "捕获窗口收集中", "running": "进行中",
+        "queued": "已排队", "collecting": "捕获窗口收集中", "running": "进行中", "paused": "已暂停",
         "completed": "已完成", "failed": "失败", "cancelled": "已取消",
     }.get(status, status)
     stage = str(progress.get("stage") or "")
     stage_name = {
         "collecting": "收集附件", "downloading": "下载文件", "extracting": "本地解析",
-        "vision_review": "视觉模型审核", "consensus": "多模型共识",
+        "vision_review": "视觉模型审核", "consensus": "多模型共识", "paused": "已暂停",
         "llm_review": "LLM 审核", "persisting": "保存结果", "completed": "完成",
     }.get(stage, stage)
     current_file = str(progress.get("current_file") or "")
@@ -4705,6 +4706,9 @@ class NameSearcherPlugin(Star):
                     progress_id = self._start_progress(event, [], status="running")
                     self._update_progress(progress_id, advance=False, stage="vision_review", kind="model_review")
                 record_id = self._model_review_queue[0]
+                await self._wait_if_paused(progress_id, str((self.store.get(record_id) or {}).get("name") or record_id))
+                if self._terminating:
+                    break
                 record = self.store.get(record_id)
                 with self._progress_lock:
                     progress = self._progress_runs.get(progress_id)
@@ -5188,6 +5192,8 @@ class NameSearcherPlugin(Star):
         return record
 
     async def _extract_event_candidates(self, event: AstrMessageEvent) -> list[AttachmentCandidate]:
+        if self._paused():
+            return []  # 面板已暂停：新消息里的附件不捕获
         if not _event_can_capture(event, self.config):
             return []
         forward_payloads = await _fetch_forward_payloads(event)
@@ -5413,6 +5419,7 @@ class NameSearcherPlugin(Star):
         queue = list(candidates)
         while queue:
             candidate = queue.pop(0)
+            await self._wait_if_paused(progress_id, candidate.name)
             await self._wait_for_memory(progress_id, candidate.name)
             self._update_progress(
                 progress_id,
@@ -5618,6 +5625,21 @@ class NameSearcherPlugin(Star):
             )
             if self._capture_window_task is None or self._capture_window_task.done():
                 self._capture_window_task = asyncio.create_task(self._flush_capture_window())
+
+    def _paused(self) -> bool:
+        return _as_bool(self.config.get("paused", False))
+
+    async def _wait_if_paused(self, progress_id: str = "", current: str = "") -> None:
+        """Hold recognition between files while the panel has paused the plugin."""
+
+        if not self._paused():
+            return
+        if progress_id:
+            self._update_progress(progress_id, advance=False, status="paused", stage="paused", current_file=current)
+        while self._paused() and not self._terminating:
+            await asyncio.sleep(1)
+        if progress_id and not self._terminating:
+            self._update_progress(progress_id, advance=False, status="running", stage="downloading", current_file=current)
 
     async def _wait_for_memory(self, progress_id: str, current: str) -> None:
         """Pause between files while the host is short of memory instead of crashing."""
@@ -5883,7 +5905,7 @@ class NameSearcherPlugin(Star):
         self._processing_upload_ids.clear()
         with self._progress_lock:
             for progress in self._progress_runs.values():
-                if progress.get("status") in {"queued", "collecting", "running"}:
+                if progress.get("status") in {"queued", "collecting", "running", "paused"}:
                     progress["status"] = "cancelled"
                     progress["stage"] = "cancelled"
                     progress["updated_at"] = _now()

@@ -1,4 +1,10 @@
 {
+  "paused": {
+    "description": "暂停捕获和识别",
+    "type": "bool",
+    "hint": "开启后不再捕获新消息中的附件，识别队列（含插件页上传、补跑模型识别）在当前文件完成后暂停；关闭后继续。插件页顶部也可一键暂停/继续。",
+    "default": false
+  },
   "storage_dir": {
     "description": "下载文件目录",
     "type": "string",

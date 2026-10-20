@@ -536,6 +536,32 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(records[0]["download_status"], "ok")
         self.assertEqual(records[0]["name"], "手作风铃.pdf")
 
+    def test_panel_pause_stops_capture_and_holds_recognition(self):
+        roster = self.temp_path / "暂停名单.txt"
+        roster.write_text("姓名：王五", encoding="utf-8")
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False, capture_interval_seconds=0)
+        main._apply_panel_config(plugin, {"paused": True})
+        self.assertTrue(main._panel_config_view(plugin)["paused"])
+        event = FakeEvent([{"type": "file", "name": roster.name, "path": str(roster)}])
+        self.assertEqual(asyncio.run(plugin.capture_event(event)), [])
+        self.assertEqual(plugin.store.list(), [])
+
+        async def held_then_resumed():
+            candidate = main.AttachmentCandidate(name=roster.name, kind="document", mime="text/plain", value=str(roster), source={})
+            task = asyncio.create_task(plugin._process_candidates(main.PanelUploadEvent(), [candidate]))
+            await asyncio.sleep(1.5)
+            held = not task.done() and plugin.store.list() == []
+            progress = [item for item in plugin._progress_runs.values() if item.get("status") == "paused"]
+            main._apply_panel_config(plugin, {"paused": False})
+            records = await asyncio.wait_for(task, timeout=10)
+            return held, bool(progress), records
+
+        held, progress_paused, records = asyncio.run(held_then_resumed())
+        self.assertTrue(held)
+        self.assertTrue(progress_paused)
+        self.assertEqual([item["name"] for item in records], [roster.name])
+        self.assertIn("王五", records[0]["ocr_text"])
+
     def test_multi_level_nested_forwards_are_captured(self):
         images = []
         for i in range(5):
