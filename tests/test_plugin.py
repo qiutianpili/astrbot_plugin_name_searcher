@@ -393,13 +393,26 @@ class NameSearcherPluginTests(unittest.TestCase):
                         self.assertEqual(resp.status, 200)
                         self.assertEqual((await resp.read()).decode("utf-8"), "张三")
                         self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+                    bad = {"X-Real-IP": "203.0.113.9"}
+                    for _ in range(main.PORTAL_BAN_BURST):
+                        async with http.get(base + "/health", headers=bad) as resp:
+                            pass
+                    async with http.get(base + "/health", headers=bad) as resp:
+                        self.assertEqual(resp.status, 403)
+                    async with http.get(base + "/health", headers=bad) as resp:
+                        self.assertEqual(resp.status, 403)
+                    async with http.get(base + "/health", headers={"X-Real-IP": "203.0.113.10"}) as resp:
+                        self.assertEqual(resp.status, 200)
+                    self.assertTrue(plugin.portal_is_banned("203.0.113.9"))
+                    self.assertTrue(plugin.portal_unban("203.0.113.9"))
+                    self.assertFalse(plugin.portal_is_banned("203.0.113.9"))
             finally:
                 plugin._terminating = True
                 await plugin._portal_server.stop()
 
         asyncio.run(scenario())
         status = plugin.portal_status()
-        self.assertEqual([item["action"] for item in status["audit"]][:3], ["download", "find", "login"])
+        self.assertEqual([item["action"] for item in status["audit"]][:4], ["ban", "download", "find", "login"])
         self.assertEqual(status["users"][0]["downloads"], 1)
 
     def test_pending_panel_upload_resumes_after_plugin_restart(self):

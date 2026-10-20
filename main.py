@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.1"
+PLUGIN_VERSION = "1.11.2"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -4399,6 +4399,8 @@ PORTAL_MAX_OPEN_CHALLENGES = 500
 PORTAL_FINDS_PER_MINUTE = 20  # per session
 PORTAL_DOWNLOADS_PER_10_MIN = 60  # per session
 PORTAL_FIND_CONCURRENCY = 2
+PORTAL_BAN_BURST = 30  # requests from one IP within PORTAL_BAN_WINDOW seconds -> permanent ban
+PORTAL_BAN_WINDOW = 10
 
 
 def _portal_random(length: int, alphabet: str) -> str:
@@ -4663,7 +4665,7 @@ class PortalServer:
 
         host = str(self.plugin.config.get("portal_host") or "127.0.0.1").strip() or "127.0.0.1"
         port = int(self.plugin.config.get("portal_port") or 6197)
-        app = web.Application(client_max_size=64 * 1024)
+        app = web.Application(client_max_size=64 * 1024, middlewares=[self._guard])
         app.router.add_route("OPTIONS", "/{tail:.*}", self.options)
         app.router.add_get("/portal/health", self.health)
         app.router.add_post("/portal/challenge", self.challenge)
@@ -4684,6 +4686,22 @@ class PortalServer:
         self.runner = runner
         self.bound = (host, port)
         _log("info", "NameSearcher portal listening on %s:%s", host, port)
+
+    @property
+    def _guard(self) -> Any:
+        from aiohttp import web
+
+        @web.middleware
+        async def guard(request: Any, handler: Any) -> Any:
+            client = self._client(request)
+            if client and self.plugin.portal_is_banned(client):
+                return self._json(request, {"ok": False, "error": "该 IP 因访问异常已被封禁，请联系管理员", "status": 403})
+            if client and request.method != "OPTIONS" and not self.plugin.portal.allow(f"burst:{client}", PORTAL_BAN_BURST, PORTAL_BAN_WINDOW):
+                self.plugin.portal_ban(client, f"{PORTAL_BAN_WINDOW} 秒内请求超过 {PORTAL_BAN_BURST} 次")
+                return self._json(request, {"ok": False, "error": "该 IP 因访问异常已被封禁，请联系管理员", "status": 403})
+            return await handler(request)
+
+        return guard
 
     async def stop(self) -> None:
         runner, self.runner = self.runner, None
@@ -4828,6 +4846,7 @@ class NameSearcherPlugin(Star):
         self._model_review_resumed = False
         self._stop_epoch = 0
         self.portal = PortalAuth()
+        self._portal_ban_cache: Optional[dict[str, Any]] = None
         self._portal_server = PortalServer(self)
         self._portal_lock = threading.RLock()
         self._portal_error = ""
@@ -5069,6 +5088,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/find", self._page_find, ["POST"], "Find which files mention a person (wildcards allowed)"),
             (f"/{PLUGIN_ID}/portal", self._page_portal_status, ["GET"], "Web query portal status, users and audit log"),
             (f"/{PLUGIN_ID}/portal/revoke", self._page_portal_revoke, ["POST"], "Revoke a user's web query sessions"),
+            (f"/{PLUGIN_ID}/portal/unban", self._page_portal_unban, ["POST"], "Lift a web query IP ban"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -5231,6 +5251,10 @@ class NameSearcherPlugin(Star):
     async def _page_portal_revoke(self) -> Any:
         payload = await _page_request_payload()
         return _page_json_response({"revoked": self.portal.revoke_user(str(payload.get("user_id") or ""))})
+
+    async def _page_portal_unban(self) -> Any:
+        payload = await _page_request_payload()
+        return _page_json_response({"unbanned": self.portal_unban(str(payload.get("ip") or ""))})
 
     async def _page_find(self) -> Any:
         payload = await _page_request_payload()
@@ -6422,6 +6446,46 @@ class NameSearcherPlugin(Star):
             temp.write_text(json.dumps(profiles, ensure_ascii=False, indent=1), encoding="utf-8")
             temp.replace(path)
 
+    def _portal_bans(self) -> dict[str, Any]:
+        if self._portal_ban_cache is None:
+            try:
+                data = json.loads((self._portal_dir() / "bans.json").read_text(encoding="utf-8"))
+                self._portal_ban_cache = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                self._portal_ban_cache = {}
+        return self._portal_ban_cache
+
+    def _portal_save_bans(self) -> None:
+        path = self._portal_dir() / "bans.json"
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(self._portal_bans(), ensure_ascii=False, indent=1), encoding="utf-8")
+        temp.replace(path)
+
+    def portal_is_banned(self, ip: str) -> bool:
+        with self._portal_lock:
+            return str(ip) in self._portal_bans()
+
+    def portal_ban(self, ip: str, reason: str) -> None:
+        ip = str(ip or "").strip()
+        if not ip:
+            return
+        with self._portal_lock:
+            bans = self._portal_bans()
+            if ip in bans:
+                return
+            bans[ip] = {"ip": ip, "since": _now(), "reason": reason}
+            self._portal_save_bans()
+        self._portal_audit("ban", {}, client=ip, query=f"{ip}：{reason}")
+        _log("warning", "NameSearcher portal banned IP %s: %s", ip, reason)
+
+    def portal_unban(self, ip: str) -> bool:
+        with self._portal_lock:
+            bans = self._portal_bans()
+            if bans.pop(str(ip or "").strip(), None) is None:
+                return False
+            self._portal_save_bans()
+        return True
+
     def portal_status(self, audit_limit: int = 50) -> dict[str, Any]:
         audit: list[dict[str, Any]] = []
         try:
@@ -6444,6 +6508,7 @@ class NameSearcherPlugin(Star):
             "sessions": self.portal.active_sessions(),
             "users": profiles[:100],
             "audit": audit,
+            "bans": sorted(self._portal_bans().values(), key=lambda item: str(item.get("since") or ""), reverse=True),
         }
 
     def portal_request_allowed(self, chat_type: str, chat_id: str, user_id: str) -> tuple[bool, str]:
