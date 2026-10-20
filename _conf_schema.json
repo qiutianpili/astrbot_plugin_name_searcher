@@ -310,6 +310,12 @@
     "hint": "远程附件下载的最长等待时间。",
     "default": 20
   },
+  "forward_file_timeout_seconds": {
+    "description": "合并转发文件下载等待（秒）",
+    "type": "int",
+    "hint": "聊天记录里的文件拿不到直链时，让 NapCat 代为下载的最长等待时间；QQ 下不下来会一直卡住，所以要设上限。0 表示不尝试，直接提示发原文件。",
+    "default": 15
+  },
   "min_free_memory_mb": {
     "description": "内存保护（MB）",
     "type": "int",

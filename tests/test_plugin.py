@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zipfile
@@ -534,6 +535,41 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(event.bot.calls, ["get_forward_msg", "get_private_file_url", "get_file", "fid-9"])
         self.assertEqual(records[0]["download_status"], "ok")
         self.assertEqual(records[0]["name"], "手作风铃.pdf")
+
+    def test_forward_file_get_file_is_bounded_and_explained(self):
+        class Bot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, *, action, **kwargs):
+                self.calls.append(action)
+                if action == "get_forward_msg":
+                    return {"data": {"messages": [{"message": [{"type": "file", "data": {"file_id": "slow-1", "file": "a.pdf"}}, {"type": "file", "data": {"file_id": "slow-2", "file": "b.pdf"}}]}]}}
+                if action == "get_private_file_url":
+                    raise RuntimeError("real fileUUID not found!")
+                if action == "get_file":
+                    await asyncio.sleep(30)
+                raise AssertionError(action)
+
+        roots = [{"messages": [{"message": [{"type": "file", "data": {"file_id": "slow-1", "file": "a.pdf"}}, {"type": "file", "data": {"file_id": "slow-2", "file": "b.pdf"}}]}]}]
+        event = FakeEvent([])
+        event.bot = Bot()
+        started = []
+        began = time.monotonic()
+        stats = asyncio.run(main._resolve_qq_file_urls(event, roots, get_file_timeout=1, on_start=started.append))
+        self.assertLess(time.monotonic() - began, 5)  # both files waited in parallel
+        self.assertEqual(started, [2])
+        self.assertEqual(stats, {"pending": 2, "resolved": 0, "failed": 2})
+        self.assertEqual(roots[0]["messages"][0]["message"][0]["data"]["name_searcher_unresolved"], main.FORWARD_UNRESOLVED_REASON)
+        notice = main._review_notice({"name": "a.pdf", "download_status": "unavailable", "reason": "no_download_url"})
+        self.assertIn("无法下载", notice)
+        self.assertIn("直接发送原文件", notice)
+        self.assertNotIn("置信度", notice)
+
+        skipped = Bot()
+        event.bot = skipped
+        asyncio.run(main._resolve_qq_file_urls(event, [{"type": "file", "data": {"file_id": "x"}}], get_file_timeout=0))
+        self.assertEqual(skipped.calls, ["get_private_file_url"])
 
     def test_extensionless_download_is_typed_by_magic_bytes(self):
         jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"x" * 40

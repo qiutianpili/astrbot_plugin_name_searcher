@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 
 
 # AstrBot moved a few imports across minor releases.  Keeping the fallback
@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.6"
+PLUGIN_VERSION = "1.8.7"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -195,6 +195,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "capture_window_enabled": True,
     "capture_interval_seconds": 30,
     "capture_progress_notify": True,
+    "forward_file_timeout_seconds": 15,
     "notify_encoding_issues": True,
     "notify_archive_limits": True,
     "archive_extraction_enabled": True,
@@ -2090,24 +2091,42 @@ async def _fetch_forward_payloads(event: Any) -> list[Any]:
     return payloads
 
 
-async def _resolve_qq_file_urls(event: Any, roots: Iterable[Any]) -> None:
+FORWARD_URL_ACTION_TIMEOUT = 8
+FORWARD_UNRESOLVED_REASON = "forward_file_unavailable"
+
+
+async def _resolve_qq_file_urls(
+    event: Any,
+    roots: Iterable[Any],
+    *,
+    get_file_timeout: float = 15,
+    on_start: Optional[Callable[[int], Any]] = None,
+) -> dict[str, int]:
     """Add downloadable URLs to OneBot file segments inside forward nodes.
 
     NapCat frequently returns only ``file_id`` in ``get_forward_msg``. The
     objects are mutable JSON dictionaries, so enriching them here lets the
     regular attachment extractor handle the result without QQ-specific logic.
+
+    Strategy: every file is resolved concurrently. The chat-scoped URL action
+    gets a short timeout; NapCat ``get_file`` (downloads next to QQ and
+    returns a local path) is bounded by ``get_file_timeout`` because QQ can
+    hang for minutes on files nested in a forward from another chat. A file
+    that still has no source is marked so the notice can say why.
     """
 
+    stats = {"pending": 0, "resolved": 0, "failed": 0}
     bot = getattr(event, "bot", None)
     call_action = getattr(bot, "call_action", None)
     if not callable(call_action):
-        return
+        return stats
     chat_type, chat_id = _event_chat_identity(event)
     message_obj = getattr(event, "message_obj", None)
     raw_message = getattr(message_obj, "raw_message", None) if message_obj is not None else None
     self_id = _object_value(raw_message, "self_id")
     routing = {"self_id": self_id} if self_id not in (None, "") else {}
     seen: set[str] = set()
+    jobs: list[tuple[MutableMapping[str, Any], str]] = []
     for root in roots:
         for value in _iter_nested(root):
             if not isinstance(value, MutableMapping):
@@ -2123,42 +2142,65 @@ async def _resolve_qq_file_urls(event: Any, roots: Iterable[Any]) -> None:
             if not file_id or file_id in seen:
                 continue
             seen.add(file_id)
-            actions: list[tuple[str, dict[str, Any]]] = []
-            if chat_type == "group" and chat_id:
-                actions.append(("get_group_file_url", {"file_id": file_id, "group_id": chat_id}))
-            else:
-                actions.append(("get_private_file_url", {"file_id": file_id}))
-            # A file inside a merged forward belongs to the original chat, so
-            # the URL actions above often fail. NapCat's get_file decodes the
-            # file_id itself and downloads the file next to QQ, returning a
-            # local path that _read_candidate can read (same host as AstrBot).
-            actions.append(("get_file", {"file_id": file_id}))
-            resolved = False
-            for action, kwargs in actions:
-                try:
-                    result = call_action(action=action, **kwargs, **routing)
-                    if inspect.isawaitable(result):
-                        result = await result
-                except Exception as exc:
-                    _log("info", "NameSearcher %s failed for forwarded file %s: %s", action, file_id, exc)
-                    continue
-                result_data = result.get("data") if isinstance(result, Mapping) and isinstance(result.get("data"), Mapping) else result
-                if not isinstance(result_data, Mapping):
-                    continue
-                url = result_data.get("url") or result_data.get("file_url") or result_data.get("download_url")
-                if not url and action == "get_file":
-                    if result_data.get("base64"):
-                        url = f"data:application/octet-stream;base64,{result_data.get('base64')}"
-                    elif result_data.get("file"):
-                        url = result_data.get("file")
-                if url:
-                    data["url"] = url
-                    data.setdefault("name", result_data.get("file_name") or result_data.get("name") or data.get("file") or file_id)
-                    resolved = True
-                    _log("info", "NameSearcher resolved forwarded file %s via %s", data.get("name") or file_id, action)
-                    break
-            if not resolved:
-                _log("warning", "NameSearcher could not resolve forwarded file %s (%s)", data.get("name") or data.get("file") or file_id, file_id)
+            jobs.append((data, file_id))
+    stats["pending"] = len(jobs)
+    if not jobs:
+        return stats
+    if on_start is not None:
+        try:
+            started = on_start(len(jobs))
+            if inspect.isawaitable(started):
+                await started
+        except Exception as exc:
+            _log("debug", "Forward receipt failed: %s", exc)
+
+    async def call(action: str, kwargs: Mapping[str, Any], timeout: float) -> Any:
+        result = call_action(action=action, **kwargs, **routing)
+        if inspect.isawaitable(result):
+            result = await asyncio.wait_for(result, timeout=max(1.0, float(timeout)))
+        return result
+
+    async def resolve(data: MutableMapping[str, Any], file_id: str) -> bool:
+        label = data.get("name") or data.get("file") or file_id
+        actions: list[tuple[str, dict[str, Any], float]] = []
+        if chat_type == "group" and chat_id:
+            actions.append(("get_group_file_url", {"file_id": file_id, "group_id": chat_id}, FORWARD_URL_ACTION_TIMEOUT))
+        else:
+            actions.append(("get_private_file_url", {"file_id": file_id}, FORWARD_URL_ACTION_TIMEOUT))
+        if get_file_timeout > 0:
+            actions.append(("get_file", {"file_id": file_id}, get_file_timeout))
+        for action, kwargs, timeout in actions:
+            began = time.monotonic()
+            try:
+                result = await call(action, kwargs, timeout)
+            except asyncio.TimeoutError:
+                _log("info", "NameSearcher %s timed out after %ss for forwarded file %s", action, int(timeout), label)
+                continue
+            except Exception as exc:
+                _log("info", "NameSearcher %s failed for forwarded file %s: %s", action, label, exc)
+                continue
+            result_data = result.get("data") if isinstance(result, Mapping) and isinstance(result.get("data"), Mapping) else result
+            if not isinstance(result_data, Mapping):
+                continue
+            url = result_data.get("url") or result_data.get("file_url") or result_data.get("download_url")
+            if not url and action == "get_file":
+                if result_data.get("base64"):
+                    url = f"data:application/octet-stream;base64,{result_data.get('base64')}"
+                elif result_data.get("file"):
+                    url = result_data.get("file")
+            if url:
+                data["url"] = url
+                data.setdefault("name", result_data.get("file_name") or result_data.get("name") or data.get("file") or file_id)
+                _log("info", "NameSearcher resolved forwarded file %s via %s in %.1fs", data.get("name") or file_id, action, time.monotonic() - began)
+                return True
+        data["name_searcher_unresolved"] = FORWARD_UNRESOLVED_REASON
+        _log("warning", "NameSearcher could not resolve forwarded file %s (%s)", label, file_id)
+        return False
+
+    results = await asyncio.gather(*(resolve(data, file_id) for data, file_id in jobs), return_exceptions=True)
+    stats["resolved"] = sum(1 for item in results if item is True)
+    stats["failed"] = len(results) - stats["resolved"]
+    return stats
 
 
 def _read_candidate(candidate: AttachmentCandidate, timeout: int, max_bytes: int) -> tuple[Optional[bytes], str]:
@@ -3334,7 +3376,19 @@ async def _call_text_model(
     return "", ""
 
 
+def _download_failure_notice(record: Mapping[str, Any]) -> str:
+    name = record.get("name")
+    reason = str(record.get("reason") or "")
+    if reason in {"no_download_url", FORWARD_UNRESOLVED_REASON}:
+        return f"文件“{name}”无法下载：QQ 没有提供它的下载地址（合并转发里的文件常见这种情况）。请直接发送原文件。"
+    if reason == "too_large":
+        return f"文件“{name}”超过单文件大小上限，未保存。"
+    return f"文件“{name}”下载失败，请稍后重新发送原文件。"
+
+
 def _review_notice(record: Mapping[str, Any]) -> str:
+    if record.get("download_status") not in (None, "", "ok"):
+        return _download_failure_notice(record)
     if record.get("llm_review_status") == "completed":
         return f"文件“{record.get('name')}”已完成 LLM 审核：{record.get('llm_review_text')}"
     return f"文件“{record.get('name')}”识别置信度较低，LLM 审核暂不可用。请重新发送更清晰或可解析的原文件。"
@@ -4997,7 +5051,14 @@ class NameSearcherPlugin(Star):
         if not _event_can_capture(event, self.config):
             return []
         forward_payloads = await _fetch_forward_payloads(event)
-        await _resolve_qq_file_urls(event, forward_payloads)
+        timeout = max(0.0, float(self.config.get("forward_file_timeout_seconds", 15) or 0))
+
+        async def receipt(count: int) -> None:
+            if _as_bool(self.config.get("capture_progress_notify", True)):
+                wait = f"，最多等待约 {int(timeout) + FORWARD_URL_ACTION_TIMEOUT} 秒" if timeout else ""
+                await _send(event, f"已收到聊天记录，正在获取其中的 {count} 个文件{wait}…")
+
+        await _resolve_qq_file_urls(event, forward_payloads, get_file_timeout=timeout, on_start=receipt)
         return _extract_candidates(event, forward_payloads)
 
     async def process_panel_upload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
