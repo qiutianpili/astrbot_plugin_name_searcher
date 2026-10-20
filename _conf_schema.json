@@ -316,6 +316,12 @@
     "hint": "聊天记录里的文件拿不到直链时，让 NapCat 代为下载的最长等待时间；QQ 下不下来会一直卡住，所以要设上限。0 表示不尝试，直接提示发原文件。",
     "default": 15
   },
+  "forward_images_only": {
+    "description": "合并转发只捕获图片",
+    "type": "bool",
+    "hint": "开启后聊天记录里的非图片文件不再尝试下载，直接在面板记为“下载失败”，并引用那条聊天记录回复发起人请其发送原文件。",
+    "default": true
+  },
   "min_free_memory_mb": {
     "description": "内存保护（MB）",
     "type": "int",

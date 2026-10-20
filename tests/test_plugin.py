@@ -500,7 +500,7 @@ class NameSearcherPluginTests(unittest.TestCase):
 
         event = FakeEvent([{"type": "forward", "data": {"id": "forward-1"}}], group_id="10001")
         event.bot = Bot()
-        plugin = make_plugin(self.temp_path, capture_progress_notify=False)
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False, forward_images_only=False)
 
         records = asyncio.run(plugin.capture_event(event))
 
@@ -529,12 +529,70 @@ class NameSearcherPluginTests(unittest.TestCase):
 
         event = FakeEvent([{"type": "forward", "data": {"id": "fw-2"}}])
         event.bot = Bot()
-        plugin = make_plugin(self.temp_path, capture_progress_notify=False)
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False, forward_images_only=False)
         with patch.object(main, "_read_text_from_file", return_value=("", 0.0)):
             records = asyncio.run(plugin.capture_event(event))
         self.assertEqual(event.bot.calls, ["get_forward_msg", "get_private_file_url", "get_file", "fid-9"])
         self.assertEqual(records[0]["download_status"], "ok")
         self.assertEqual(records[0]["name"], "手作风铃.pdf")
+
+    def test_forward_non_image_files_get_quoted_notice_and_failed_record(self):
+        image = self.temp_path / "roster.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 40)
+
+        class Bot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, *, action, **kwargs):
+                self.calls.append(action)
+                if action == "get_forward_msg":
+                    return {"data": {"messages": [{"sender": {"user_id": 7}, "message": [
+                        {"type": "file", "data": {"file_id": "f-pdf", "file": "名单.pdf"}},
+                        {"type": "file", "data": {"file_id": "f-doc", "file": "报名表.docx"}},
+                        {"type": "image", "data": {"file": "roster.png", "url": str(image)}},
+                    ]}]}}
+                raise AssertionError(action)
+
+        sent = []
+
+        class Comp:
+            class Reply:
+                def __init__(self, id):
+                    self.id = id
+            class At:
+                def __init__(self, qq):
+                    self.qq = qq
+            class Plain:
+                def __init__(self, text):
+                    self.text = text
+
+        event = FakeEvent([{"type": "forward", "data": {"id": "fw-9"}}], sender_id="u-5", group_id="10001")
+        event.bot = Bot()
+        event.chain_result = lambda components: components
+        event.send = lambda value: sent.append(value)
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False)
+        fake_api = types.ModuleType("astrbot.api.message_components")
+        fake_api.Reply, fake_api.At, fake_api.Plain = Comp.Reply, Comp.At, Comp.Plain
+        fake_root, fake_pkg = types.ModuleType("astrbot"), types.ModuleType("astrbot.api")
+        fake_root.api, fake_pkg.message_components = fake_pkg, fake_api
+        with patch.dict(sys.modules, {"astrbot": sys.modules.get("astrbot", fake_root), "astrbot.api": sys.modules.get("astrbot.api", fake_pkg), "astrbot.api.message_components": fake_api}), \
+                patch.object(main, "_read_text_from_file", return_value=("", 0.0)):
+            records = asyncio.run(plugin.capture_event(event))
+        self.assertEqual(event.bot.calls, ["get_forward_msg"])  # no download attempts for pdf/docx
+        by_name = {item["name"]: item for item in records}
+        self.assertEqual(by_name["名单.pdf"]["download_status"], "unavailable")
+        self.assertEqual(by_name["名单.pdf"]["reason"], main.FORWARD_UNRESOLVED_REASON)
+        self.assertEqual(by_name["报名表.docx"]["reason"], main.FORWARD_UNRESOLVED_REASON)
+        self.assertEqual(by_name["roster.png"]["download_status"], "ok")
+        quoted = [item for item in sent if isinstance(item, list)]
+        self.assertEqual(len(quoted), 1)  # one quoted notice, no per-file repeats
+        self.assertEqual(quoted[0][0].id, "m-1")
+        self.assertEqual(quoted[0][1].qq, "u-5")
+        self.assertIn("名单.pdf", quoted[0][2].text)
+        self.assertIn("报名表.docx", quoted[0][2].text)
+        self.assertIn("直接发送原文件", quoted[0][2].text)
+        self.assertFalse([item for item in sent if isinstance(item, str) and "名单.pdf" in item])
 
     def test_forward_file_get_file_is_bounded_and_explained(self):
         class Bot:

@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.8"
+PLUGIN_VERSION = "1.8.9"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -196,6 +196,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "capture_interval_seconds": 30,
     "capture_progress_notify": True,
     "forward_file_timeout_seconds": 15,
+    "forward_images_only": True,
     "notify_encoding_issues": True,
     "notify_archive_limits": True,
     "archive_extraction_enabled": True,
@@ -2098,6 +2099,16 @@ async def _fetch_forward_payloads(event: Any) -> list[Any]:
 
 FORWARD_URL_ACTION_TIMEOUT = 8
 FORWARD_UNRESOLVED_REASON = "forward_file_unavailable"
+FORWARD_SKIP_URL = "name-searcher-skip://forward-file"
+
+
+def _forward_file_is_image(data: Mapping[str, Any]) -> bool:
+    for key in ("name", "file", "file_name", "filename"):
+        value = str(data.get(key) or "").strip()
+        if value and Path(urllib.parse.urlparse(value).path).suffix.lower() in IMAGE_EXTENSIONS:
+            return True
+    mime = str(data.get("mime") or data.get("mime_type") or "").lower()
+    return mime.startswith("image/")
 
 
 async def _resolve_qq_file_urls(
@@ -2106,6 +2117,8 @@ async def _resolve_qq_file_urls(
     *,
     get_file_timeout: float = 15,
     on_start: Optional[Callable[[int], Any]] = None,
+    images_only: bool = False,
+    unavailable: Optional[list[str]] = None,
 ) -> dict[str, int]:
     """Add downloadable URLs to OneBot file segments inside forward nodes.
 
@@ -2118,9 +2131,37 @@ async def _resolve_qq_file_urls(
     returns a local path) is bounded by ``get_file_timeout`` because QQ can
     hang for minutes on files nested in a forward from another chat. A file
     that still has no source is marked so the notice can say why.
+
+    With ``images_only`` non-image files are not requested at all: they are
+    marked unavailable at once (QQ cannot hand them out from a forward) and
+    their names are appended to ``unavailable`` for the quoted notice.
     """
 
     stats = {"pending": 0, "resolved": 0, "failed": 0}
+    roots = list(roots)
+    if images_only:
+        skipped_ids: set[str] = set()
+        for root in roots:
+            for value in _iter_nested(root):
+                if not isinstance(value, MutableMapping):
+                    continue
+                attrs = _object_attrs(value)
+                data = value.get("data") if isinstance(value.get("data"), MutableMapping) else value
+                type_hint = str(attrs.get("type") or data.get("type") or "").casefold()
+                if type_hint != "file" and not any(data.get(key) for key in ("file_id", "fileId")):
+                    continue
+                if _forward_file_is_image(data) or data.get("name_searcher_unresolved"):
+                    continue
+                file_id = str(data.get("file_id") or data.get("fileId") or data.get("name") or data.get("file") or "")
+                data["url"] = FORWARD_SKIP_URL
+                data["name_searcher_unresolved"] = FORWARD_UNRESOLVED_REASON
+                data.setdefault("name", data.get("file") or file_id or "未命名文件")
+                if file_id in skipped_ids:
+                    continue
+                skipped_ids.add(file_id)
+                stats["skipped"] = stats.get("skipped", 0) + 1
+                if unavailable is not None:
+                    unavailable.append(str(data.get("name")))
     bot = getattr(event, "bot", None)
     call_action = getattr(bot, "call_action", None)
     if not callable(call_action):
@@ -2199,6 +2240,10 @@ async def _resolve_qq_file_urls(
                 _log("info", "NameSearcher resolved forwarded file %s via %s in %.1fs", data.get("name") or file_id, action, time.monotonic() - began)
                 return True
         data["name_searcher_unresolved"] = FORWARD_UNRESOLVED_REASON
+        data["url"] = FORWARD_SKIP_URL
+        data.setdefault("name", data.get("file") or file_id)
+        if unavailable is not None:
+            unavailable.append(str(data.get("name")))
         _log("warning", "NameSearcher could not resolve forwarded file %s (%s)", label, file_id)
         return False
 
@@ -2210,6 +2255,8 @@ async def _resolve_qq_file_urls(
 
 def _read_candidate(candidate: AttachmentCandidate, timeout: int, max_bytes: int) -> tuple[Optional[bytes], str]:
     value = candidate.value
+    if isinstance(value, str) and value.startswith(FORWARD_SKIP_URL):
+        return None, FORWARD_UNRESOLVED_REASON
     if isinstance(value, (bytes, bytearray)):
         content = bytes(value)
         if len(content) > max_bytes:
@@ -2855,6 +2902,46 @@ async def _send(event: Any, text: str) -> None:
         _log("debug", "Unable to send proactive notice: %s", exc)
 
 
+async def _send_quoted(event: Any, text: str) -> None:
+    """Reply to the triggering message (quote) and @ its sender in groups."""
+
+    sender = getattr(event, "send", None)
+    chain_result = getattr(event, "chain_result", None)
+    if callable(sender) and callable(chain_result):
+        try:
+            import astrbot.api.message_components as Comp  # type: ignore
+
+            message_id = str(_event_value(event, "get_message_id", "message_id") or "")
+            sender_id = str(_event_value(event, "get_sender_id", "sender_id", "user_id") or "")
+            chat_type, _ = _event_chat_identity(event)
+            components: list[Any] = []
+            if message_id:
+                components.append(Comp.Reply(id=message_id))
+            if chat_type == "group" and sender_id:
+                components.append(Comp.At(qq=sender_id))
+                text = " " + text
+            components.append(Comp.Plain(text))
+            result = sender(chain_result(components))
+            if inspect.isawaitable(result):
+                await result
+            return
+        except Exception as exc:
+            _log("debug", "Unable to send quoted notice, falling back to plain text: %s", exc)
+    await _send(event, text)
+
+
+def _forward_unavailable_notice(names: Iterable[str], limit: int = 10) -> str:
+    unique = list(dict.fromkeys(str(name) for name in names if str(name).strip()))
+    if not unique:
+        return ""
+    shown = "\n".join(f"· {name}" for name in unique[:limit])
+    more = f"\n…等共 {len(unique)} 个" if len(unique) > limit else ""
+    return (
+        f"这条聊天记录里有 {len(unique)} 个非图片文件下载失败（合并转发里只能获取图片，QQ 不提供其他文件的下载）：\n"
+        f"{shown}{more}\n请直接发送原文件。图片已照常识别。"
+    )
+
+
 def _model_text(value: Any, depth: int = 0) -> str:
     """Extract text from common AstrBot/OpenAI provider response shapes."""
 
@@ -3384,7 +3471,9 @@ async def _call_text_model(
 def _download_failure_notice(record: Mapping[str, Any]) -> str:
     name = record.get("name")
     reason = str(record.get("reason") or "")
-    if reason in {"no_download_url", FORWARD_UNRESOLVED_REASON}:
+    if reason == FORWARD_UNRESOLVED_REASON:
+        return f"文件“{name}”下载失败：合并转发的聊天记录里只能获取图片，非图片文件 QQ 不提供下载。请直接发送原文件。"
+    if reason == "no_download_url":
         return f"文件“{name}”无法下载：QQ 没有提供它的下载地址（合并转发里的文件常见这种情况）。请直接发送原文件。"
     if reason == "too_large":
         return f"文件“{name}”超过单文件大小上限，未保存。"
@@ -5099,7 +5188,15 @@ class NameSearcherPlugin(Star):
                 wait = f"，最多等待约 {int(timeout) + FORWARD_URL_ACTION_TIMEOUT} 秒" if timeout else ""
                 await _send(event, f"已收到聊天记录，正在获取其中的 {count} 个文件{wait}…")
 
-        await _resolve_qq_file_urls(event, forward_payloads, get_file_timeout=timeout, on_start=receipt)
+        unavailable: list[str] = []
+        images_only = _as_bool(self.config.get("forward_images_only", True))
+        await _resolve_qq_file_urls(
+            event, forward_payloads, get_file_timeout=timeout, on_start=receipt,
+            images_only=images_only, unavailable=unavailable,
+        )
+        notice = _forward_unavailable_notice(unavailable)
+        if notice:
+            await _send_quoted(event, notice)
         return _extract_candidates(event, forward_payloads)
 
     async def process_panel_upload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -5425,6 +5522,8 @@ class NameSearcherPlugin(Star):
                     and record.get("extraction_status") in {"no_text", "failed"}
                 )
             )
+            if record.get("reason") == FORWARD_UNRESOLVED_REASON:
+                needs_review = False  # already answered with one quoted notice
             if self.config.get("request_review_on_low_confidence", True) and needs_review:
                 await _send(event, _review_notice(record))
         if _as_bool(self.config.get("notify_archive_limits", True)):
