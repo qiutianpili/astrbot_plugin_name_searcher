@@ -219,7 +219,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.7</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.8.8</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -461,11 +461,11 @@
       function findFile(id) { return state.files.find(file => fileId(file) === id); }
       const DOC_VIEWER_URL = 'https://20610728.xyz/hark/doc-viewer.html';
       const DOC_VIEWER_ORIGIN = 'https://20610728.xyz';
-      const DOC_VIEWER_EXTS = new Set(['xlsx', 'xls', 'xlsm', 'xlsb', 'ods', 'csv', 'tsv', 'docx', 'docm', 'dotx', 'pdf', 'txt', 'md', 'json', 'xml', 'log', 'ini', 'yaml', 'yml']);
+      const DOC_VIEWER_EXTS = new Set(['xlsx', 'xls', 'xlsm', 'xlsb', 'ods', 'csv', 'tsv', 'docx', 'docm', 'dotx', 'pdf', 'txt', 'md', 'json', 'xml', 'log', 'ini', 'yaml', 'yml', 'png', 'jpg', 'jpeg', 'jpe', 'jfif', 'gif', 'webp', 'bmp']);
       const fileExt = file => { const match = /\.([a-z0-9]+)$/i.exec(fileName(file)); return (match ? match[1] : text(file.format, '')).toLowerCase(); };
       const inlinePreviewed = file => isImage(file) || (!!fileUrl(file) && /application\/pdf|\.pdf$/i.test(`${file.mime_type || ''} ${fileName(file)}`));
       // Inside AstrBot the panel iframe has no allow-popups, so the viewer falls back to a frame in the panel; Chrome blocks PDFs in sandboxed frames.
-      const canViewOnline = file => !!file && !!file.id && file.download_status !== 'unavailable' && DOC_VIEWER_EXTS.has(fileExt(file)) && !inlinePreviewed(file) && !(useBridge && fileExt(file) === 'pdf');
+      const canViewOnline = file => !!file && !!file.id && file.download_status !== 'unavailable' && DOC_VIEWER_EXTS.has(fileExt(file)) && (isImage(file) || !inlinePreviewed(file)) && !(useBridge && fileExt(file) === 'pdf');
       let previewFile = null;
       async function loadFileData(file) {
         if (useBridge) {

@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.7"
+PLUGIN_VERSION = "1.8.8"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -716,6 +716,11 @@ class ArtifactStore:
                         path.unlink()
                     except OSError as exc:
                         _log("warning", "Unable to remove %s: %s", path, exc)
+                preview = self.root / PREVIEW_DIR_NAME / f"{item.get('id')}.jpg"
+                try:
+                    preview.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 removed.append(str(item.get("id")))
             self._records = retained
             if removed:
@@ -3535,6 +3540,52 @@ def _blob_payload(store: ArtifactStore, artifact_id: str) -> tuple[dict[str, Any
     }, 200
 
 
+PREVIEW_DIR_NAME = ".previews"
+PREVIEW_MAX_SIDE = 1280
+PREVIEW_JPEG_QUALITY = 78
+
+
+def _preview_image_bytes(store: ArtifactStore, record: Mapping[str, Any], path: Path) -> Optional[bytes]:
+    """Small cached JPEG for the panel preview.
+
+    Phone screenshots are 1-3 MB; through the base64 JSON bridge and a
+    Europe-to-China link that took seconds. A 1280px JPEG is ~150-300 KB and
+    is cached next to the store, so the second open is just a file read.
+    """
+
+    cache = store.root / PREVIEW_DIR_NAME / f"{record.get('id')}.jpg"
+    try:
+        if cache.exists() and cache.stat().st_mtime >= path.stat().st_mtime:
+            return cache.read_bytes()
+    except OSError:
+        pass
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+
+        with Image.open(path) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE))
+            if image.mode not in {"RGB", "L"}:
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                rgba = image.convert("RGBA")
+                background.paste(rgba, mask=rgba.split()[-1])
+                image = background
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=PREVIEW_JPEG_QUALITY, optimize=True, progressive=True)
+            data = output.getvalue()
+    except Exception as exc:
+        _log("debug", "Preview resize failed for %s: %s", path, exc)
+        return None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_suffix(".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(cache)
+    except OSError:
+        pass
+    return data
+
+
 def _preview_payload(store: ArtifactStore, artifact_id: str) -> tuple[dict[str, Any], int]:
     """Return an iframe-safe image preview without exposing a local path."""
 
@@ -3547,29 +3598,18 @@ def _preview_payload(store: ArtifactStore, artifact_id: str) -> tuple[dict[str, 
     mime = str(record.get("mime") or _mime_for(path))
     if record.get("kind") != "image" and not mime.startswith("image/"):
         return {"error": "该格式仅提供信息预览和下载"}, 415
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        return {"error": f"读取预览失败：{exc}"}, 500
-    # Bridge JSON is not a good transport for very large originals. Resize a
-    # preview when Pillow is available and retain the original for download.
-    if len(raw) > 4 * 1024 * 1024:
+    raw = _preview_image_bytes(store, record, path)
+    if raw is not None:
+        mime = "image/jpeg"
+    else:
         try:
-            from PIL import Image  # type: ignore
-
-            with Image.open(io.BytesIO(raw)) as image:
-                image.thumbnail((1800, 1800))
-                output = io.BytesIO()
-                if image.mode not in {"RGB", "L"}:
-                    image = image.convert("RGB")
-                image.save(output, format="JPEG", quality=86, optimize=True)
-                raw = output.getvalue()
-                mime = "image/jpeg"
-        except Exception:
-            if len(raw) > 12 * 1024 * 1024:
+            if path.stat().st_size > 12 * 1024 * 1024:
                 return {"error": "图片过大，请下载后查看"}, 413
+            raw = path.read_bytes()
+        except OSError as exc:
+            return {"error": f"读取预览失败：{exc}"}, 500
     data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-    return {"id": record.get("id"), "name": record.get("name"), "data_url": data_uri}, 200
+    return {"id": record.get("id"), "name": record.get("name"), "data_url": data_uri, "size": len(raw)}, 200
 
 
 def _page_json_response(payload: Any, status_code: int = 200) -> Any:
@@ -3765,7 +3805,8 @@ class _FallbackPanelApp:
                 return
             preview_match = re.fullmatch(r"/files/([^/]+)/preview", path)
             if method == "GET" and preview_match:
-                payload, status = _preview_payload(
+                payload, status = await asyncio.to_thread(
+                    _preview_payload,
                     self.plugin.store,
                     urllib.parse.unquote(preview_match.group(1)),
                 )
@@ -3958,7 +3999,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         return FileResponse(path, media_type=record.get("mime") or "application/octet-stream", filename=record.get("name"))
 
     async def preview_file(request: Any) -> JSONResponse:
-        payload, status = _preview_payload(plugin.store, request.path_params.get("artifact_id", ""))
+        payload, status = await asyncio.to_thread(_preview_payload, plugin.store, request.path_params.get("artifact_id", ""))
         return JSONResponse(payload, status_code=status)
 
     async def delete_files(request: Any) -> JSONResponse:
@@ -4598,7 +4639,7 @@ class NameSearcherPlugin(Star):
             self._model_review_task = None
 
     async def _page_file_preview(self, artifact_id: str) -> Any:
-        payload, status = _preview_payload(self.store, artifact_id)
+        payload, status = await asyncio.to_thread(_preview_payload, self.store, artifact_id)
         return _page_json_response(payload, status)
 
     async def _page_file_blob(self, artifact_id: str) -> Any:

@@ -1574,6 +1574,28 @@ class NameSearcherPluginTests(unittest.TestCase):
         response = asyncio.run(plugin._page_files())
         self.assertEqual(response, {"files": [], "count": 0})
 
+    def test_image_preview_is_downscaled_and_cached(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+        import io as _io
+        buffer = _io.BytesIO()
+        Image.effect_noise((2400, 3200), 64).convert("RGB").save(buffer, format="PNG")
+        plugin = make_plugin(self.temp_path)
+        record = plugin.store.add_bytes("big.png", buffer.getvalue(), kind="image", mime="image/png", source={})
+        payload, status = main._preview_payload(plugin.store, record["id"])
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["data_url"].startswith("data:image/jpeg;base64,"))
+        data = base64.b64decode(payload["data_url"].split(",", 1)[1])
+        with Image.open(_io.BytesIO(data)) as small:
+            self.assertLessEqual(max(small.size), main.PREVIEW_MAX_SIDE)
+        cache = plugin.store.root / main.PREVIEW_DIR_NAME / f"{record['id']}.jpg"
+        self.assertTrue(cache.exists())
+        self.assertEqual(main._preview_payload(plugin.store, record["id"])[0]["data_url"], payload["data_url"])
+        plugin.store.delete([record["id"]])
+        self.assertFalse(cache.exists())
+
     def test_bridge_image_preview_returns_data_uri_without_local_path(self):
         plugin = make_plugin(self.temp_path)
         record = plugin.store.add_bytes(
