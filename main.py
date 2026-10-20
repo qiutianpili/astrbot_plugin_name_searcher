@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.11.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -218,6 +218,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_free_memory_mb": 200,
     "import_max_bundle_mb": 2048,
     "import_model_review": True,
+    "portal_enabled": False,
+    "portal_host": "127.0.0.1",
+    "portal_port": 6197,
+    "portal_public_url": "",
+    "portal_allowed_origins": "https://20610728.xyz",
+    "portal_allowed_groups": "",
+    "portal_allowed_users": "",
+    "portal_allow_private": True,
+    "portal_session_minutes": 30,
 }
 
 # Keys that only the AstrBot plugin config (admin) may change.  The plugin
@@ -229,6 +238,8 @@ PANEL_LOCKED_KEYS = frozenset({
     "panel_mount_path",
     "panel_public_url",
     "panel_access_token",
+    "portal_host",
+    "portal_port",
 })
 # Never echoed back to any panel client.
 PANEL_SECRET_KEYS = frozenset({"panel_access_token"})
@@ -4372,6 +4383,384 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
     return Starlette(routes=routes)
 
 
+# ---------------------------------------------------------------------------
+# Public query portal (v1.11.0): a website asks for a pairing code, the user
+# sends it to the bot, the bot replies with a verification code that only the
+# browser holding that pairing challenge can redeem for a temporary session.
+# ---------------------------------------------------------------------------
+
+PORTAL_PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+PORTAL_PAIR_TTL_SECONDS = 600
+PORTAL_MAX_VERIFY_ATTEMPTS = 5
+PORTAL_CHALLENGES_PER_IP = 12  # per 10 minutes
+PORTAL_CLAIMS_PER_USER = 6  # per 10 minutes
+PORTAL_RATE_WINDOW = 600
+
+
+def _portal_random(length: int, alphabet: str) -> str:
+    import secrets
+
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _portal_token() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(32)
+
+
+def _portal_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class PortalAuth:
+    """In-memory pairing / verification / session state for the public portal.
+
+    Nothing secret is persisted: a restart simply invalidates open challenges
+    and sessions.  User profiles and the audit trail are written separately.
+    """
+
+    def __init__(self, clock: Any = time.time) -> None:
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._challenges: dict[str, dict[str, Any]] = {}
+        self._pairs: dict[str, str] = {}
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self._hits: dict[str, list[float]] = {}
+
+    def _rate_ok(self, key: str, limit: int) -> bool:
+        now = self._clock()
+        hits = [stamp for stamp in self._hits.get(key, []) if now - stamp < PORTAL_RATE_WINDOW]
+        if len(hits) >= limit:
+            self._hits[key] = hits
+            return False
+        hits.append(now)
+        self._hits[key] = hits
+        return True
+
+    def prune(self) -> None:
+        now = self._clock()
+        with self._lock:
+            for challenge_id, item in list(self._challenges.items()):
+                if now > item["expires"]:
+                    self._challenges.pop(challenge_id, None)
+                    self._pairs.pop(item["pair_code"], None)
+            for token_hash, session in list(self._sessions.items()):
+                if now > session["expires"]:
+                    self._sessions.pop(token_hash, None)
+            for key, hits in list(self._hits.items()):
+                if not any(now - stamp < PORTAL_RATE_WINDOW for stamp in hits):
+                    self._hits.pop(key, None)
+
+    def create_challenge(self, client: str) -> dict[str, Any]:
+        self.prune()
+        with self._lock:
+            if not self._rate_ok(f"ip:{client}", PORTAL_CHALLENGES_PER_IP):
+                return {"ok": False, "error": "请求太频繁，请稍后再试", "status": 429}
+            challenge_id = _portal_token()
+            pair_code = _portal_random(6, PORTAL_PAIR_ALPHABET)
+            while pair_code in self._pairs:
+                pair_code = _portal_random(6, PORTAL_PAIR_ALPHABET)
+            now = self._clock()
+            self._challenges[_portal_digest(challenge_id)] = {
+                "pair_code": pair_code,
+                "client": client,
+                "created": now,
+                "expires": now + PORTAL_PAIR_TTL_SECONDS,
+                "user": None,
+                "code_hash": "",
+                "attempts": 0,
+            }
+            self._pairs[pair_code] = _portal_digest(challenge_id)
+            return {"ok": True, "challenge": challenge_id, "pair_code": pair_code, "expires_in": PORTAL_PAIR_TTL_SECONDS}
+
+    def challenge_state(self, challenge_id: str) -> dict[str, Any]:
+        self.prune()
+        with self._lock:
+            item = self._challenges.get(_portal_digest(str(challenge_id or "")))
+            if not item:
+                return {"ok": False, "error": "识别码已过期，请刷新获取新的识别码", "status": 410}
+            return {
+                "ok": True,
+                "pair_code": item["pair_code"],
+                "claimed": bool(item["user"]),
+                "expires_in": max(0, int(item["expires"] - self._clock())),
+            }
+
+    def claim(self, pair_code: str, user: Mapping[str, Any]) -> dict[str, Any]:
+        """Bind a pairing code to the chat user and mint the verification code."""
+
+        self.prune()
+        code_key = re.sub(r"[^A-Za-z0-9]", "", str(pair_code or "")).upper()
+        user_id = str(user.get("user_id") or "")
+        with self._lock:
+            if not self._rate_ok(f"user:{user_id}", PORTAL_CLAIMS_PER_USER):
+                return {"ok": False, "error": "申请太频繁，请 10 分钟后再试"}
+            challenge_hash = self._pairs.get(code_key)
+            item = self._challenges.get(challenge_hash or "")
+            if not item:
+                return {"ok": False, "error": "识别码无效或已过期，请在查询页刷新后重新获取"}
+            if item["user"] and str(item["user"].get("user_id")) != user_id:
+                return {"ok": False, "error": "这个识别码已被其他人申请，请在查询页刷新后重新获取"}
+            verify_code = _portal_random(6, "0123456789")
+            item["user"] = dict(user)
+            item["code_hash"] = _portal_digest(verify_code)
+            item["attempts"] = 0
+            return {"ok": True, "code": verify_code, "pair_code": code_key, "expires_in": max(0, int(item["expires"] - self._clock()))}
+
+    def verify(self, challenge_id: str, code: str, session_minutes: float) -> dict[str, Any]:
+        self.prune()
+        challenge_hash = _portal_digest(str(challenge_id or ""))
+        with self._lock:
+            item = self._challenges.get(challenge_hash)
+            if not item:
+                return {"ok": False, "error": "识别码已过期，请刷新获取新的识别码", "status": 410}
+            if not item["user"] or not item["code_hash"]:
+                return {"ok": False, "error": "请先把识别码发给机器人获取验证码", "status": 400}
+            item["attempts"] += 1
+            if not hmac.compare_digest(item["code_hash"], _portal_digest(re.sub(r"\D", "", str(code or "")))):
+                if item["attempts"] >= PORTAL_MAX_VERIFY_ATTEMPTS:
+                    self._challenges.pop(challenge_hash, None)
+                    self._pairs.pop(item["pair_code"], None)
+                    return {"ok": False, "error": "验证码错误次数过多，请刷新获取新的识别码", "status": 410}
+                left = PORTAL_MAX_VERIFY_ATTEMPTS - item["attempts"]
+                return {"ok": False, "error": f"验证码不正确，还可以尝试 {left} 次", "status": 403}
+            self._challenges.pop(challenge_hash, None)
+            self._pairs.pop(item["pair_code"], None)
+            token = _portal_token()
+            ttl = max(1.0, float(session_minutes or 30)) * 60
+            now = self._clock()
+            self._sessions[_portal_digest(token)] = {
+                "user": dict(item["user"]),
+                "created": now,
+                "expires": now + ttl,
+                "files": set(),
+            }
+            return {"ok": True, "token": token, "expires_in": int(ttl), "user": _portal_public_user(item["user"])}
+
+    def session(self, token: str) -> Optional[dict[str, Any]]:
+        self.prune()
+        with self._lock:
+            return self._sessions.get(_portal_digest(str(token or "")))
+
+    def revoke(self, token: str) -> None:
+        with self._lock:
+            self._sessions.pop(_portal_digest(str(token or "")), None)
+
+    def revoke_user(self, user_id: str) -> int:
+        with self._lock:
+            doomed = [key for key, session in self._sessions.items() if str(session["user"].get("user_id")) == str(user_id)]
+            for key in doomed:
+                self._sessions.pop(key, None)
+            return len(doomed)
+
+    def active_sessions(self) -> list[dict[str, Any]]:
+        self.prune()
+        now = self._clock()
+        with self._lock:
+            return [
+                {**_portal_public_user(session["user"]), "expires_in": int(session["expires"] - now)}
+                for session in self._sessions.values()
+            ]
+
+
+def _portal_public_user(user: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "user_id": str(user.get("user_id") or ""),
+        "nickname": str(user.get("nickname") or ""),
+        "chat_type": str(user.get("chat_type") or ""),
+        "group_id": str(user.get("group_id") or ""),
+    }
+
+
+def _portal_strip_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Public view of a find result: names, file ids/names and the matched line only."""
+
+    names = []
+    for group in result.get("names") or []:
+        files = [
+            {"id": str(item.get("id") or ""), "name": str(item.get("name") or "未命名文件"), "line": str(item.get("line") or "")[:200], "kind": item.get("kind")}
+            for item in group.get("files") or []
+            if item.get("id")
+        ]
+        names.append({"name": str(group.get("name") or ""), "files": files})
+    return {
+        "ok": bool(result.get("ok", True)),
+        "query": str(result.get("query") or ""),
+        "wildcard": bool(result.get("wildcard")),
+        "names": names,
+        "name_count": int(result.get("name_count") or len(names)),
+        "file_count": int(result.get("file_count") or 0),
+        "truncated": int(result.get("truncated") or 0),
+        "message": str(result.get("message") or ""),
+    }
+
+
+class PortalServer:
+    """Tiny aiohttp server exposing only the portal endpoints (behind a reverse proxy)."""
+
+    def __init__(self, plugin: "NameSearcherPlugin") -> None:
+        self.plugin = plugin
+        self.runner: Any = None
+        self.bound: tuple[str, int] = ("", 0)
+
+    @property
+    def running(self) -> bool:
+        return self.runner is not None
+
+    def _origins(self) -> set[str]:
+        return {item.rstrip("/") for item in _parse_allowed_ids(self.plugin.config.get("portal_allowed_origins", ""))}
+
+    def _cors(self, request: Any) -> dict[str, str]:
+        origin = str(request.headers.get("Origin") or "").rstrip("/")
+        allowed = self._origins()
+        if origin and ("*" in allowed or origin in allowed):
+            return {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Max-Age": "600",
+                "Vary": "Origin",
+            }
+        return {"Vary": "Origin"}
+
+    def _client(self, request: Any) -> str:
+        forwarded = str(request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        return forwarded or str(request.remote or "")
+
+    def _json(self, request: Any, payload: Mapping[str, Any], status: int = 200) -> Any:
+        from aiohttp import web
+
+        body = {key: value for key, value in payload.items() if key != "status"}
+        return web.json_response(body, status=int(payload.get("status") or status), headers={**self._cors(request), "Cache-Control": "no-store"}, dumps=lambda data: json.dumps(data, ensure_ascii=False))
+
+    def _token(self, request: Any) -> str:
+        header = str(request.headers.get("Authorization") or "")
+        if header.lower().startswith("bearer "):
+            return header[7:].strip()
+        return str(request.query.get("token") or "")
+
+    async def _payload(self, request: Any) -> dict[str, Any]:
+        try:
+            data = await request.json()
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def start(self) -> None:
+        from aiohttp import web
+
+        host = str(self.plugin.config.get("portal_host") or "127.0.0.1").strip() or "127.0.0.1"
+        port = int(self.plugin.config.get("portal_port") or 6197)
+        app = web.Application(client_max_size=64 * 1024)
+        app.router.add_route("OPTIONS", "/{tail:.*}", self.options)
+        app.router.add_get("/portal/health", self.health)
+        app.router.add_post("/portal/challenge", self.challenge)
+        app.router.add_post("/portal/challenge/state", self.challenge_state)
+        app.router.add_post("/portal/verify", self.verify)
+        app.router.add_get("/portal/session", self.session_info)
+        app.router.add_post("/portal/logout", self.logout)
+        app.router.add_post("/portal/find", self.find)
+        app.router.add_get("/portal/files/{artifact_id}/content", self.content)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        try:
+            await site.start()
+        except Exception:
+            await runner.cleanup()
+            raise
+        self.runner = runner
+        self.bound = (host, port)
+        _log("info", "NameSearcher portal listening on %s:%s", host, port)
+
+    async def stop(self) -> None:
+        runner, self.runner = self.runner, None
+        if runner is not None:
+            await runner.cleanup()
+
+    async def options(self, request: Any) -> Any:
+        from aiohttp import web
+
+        return web.Response(status=204, headers=self._cors(request))
+
+    async def health(self, request: Any) -> Any:
+        return self._json(request, {"ok": True, "version": PLUGIN_VERSION, "session_minutes": self.plugin._portal_session_minutes()})
+
+    async def challenge(self, request: Any) -> Any:
+        result = self.plugin.portal.create_challenge(self._client(request))
+        if result.get("ok"):
+            result["bot_command"] = f"/验证码 {result['pair_code']}"
+        return self._json(request, result)
+
+    async def challenge_state(self, request: Any) -> Any:
+        data = await self._payload(request)
+        return self._json(request, self.plugin.portal.challenge_state(str(data.get("challenge") or "")))
+
+    async def verify(self, request: Any) -> Any:
+        data = await self._payload(request)
+        result = self.plugin.portal.verify(str(data.get("challenge") or ""), str(data.get("code") or ""), self.plugin._portal_session_minutes())
+        if result.get("ok"):
+            self.plugin._portal_audit("login", result.get("user") or {}, client=self._client(request))
+        return self._json(request, result)
+
+    def _session_or_error(self, request: Any) -> tuple[Optional[dict[str, Any]], Any]:
+        session = self.plugin.portal.session(self._token(request))
+        if session is None:
+            return None, self._json(request, {"ok": False, "error": "登录已过期，请重新获取验证码", "status": 401})
+        return session, None
+
+    async def session_info(self, request: Any) -> Any:
+        session, error = self._session_or_error(request)
+        if error is not None:
+            return error
+        return self._json(request, {"ok": True, "user": _portal_public_user(session["user"]), "expires_in": int(session["expires"] - time.time())})
+
+    async def logout(self, request: Any) -> Any:
+        self.plugin.portal.revoke(self._token(request))
+        return self._json(request, {"ok": True})
+
+    async def find(self, request: Any) -> Any:
+        session, error = self._session_or_error(request)
+        if error is not None:
+            return error
+        data = await self._payload(request)
+        query = str(data.get("query") or "").strip()[:64]
+        result = _portal_strip_result(await asyncio.to_thread(self.plugin.find_objects, query))
+        for group in result["names"]:
+            for item in group["files"]:
+                session["files"].add(item["id"])
+        self.plugin._portal_audit("find", session["user"], query=query, client=self._client(request), names=result["name_count"])
+        return self._json(request, result)
+
+    async def content(self, request: Any) -> Any:
+        from aiohttp import web
+
+        session, error = self._session_or_error(request)
+        if error is not None:
+            return error
+        artifact_id = str(request.match_info.get("artifact_id") or "")
+        if artifact_id not in session["files"]:
+            return self._json(request, {"ok": False, "error": "只能查看查询结果中的文件", "status": 403})
+        record = self.plugin.store.get(artifact_id)
+        path = self.plugin.store.path_for(record) if record else None
+        if not record or not path or not path.exists():
+            return self._json(request, {"ok": False, "error": "文件不存在", "status": 404})
+        name = str(record.get("name") or path.name)
+        inline = str(request.query.get("inline") or "") in {"1", "true"}
+        disposition = "inline" if inline else "attachment"
+        headers = {
+            **self._cors(request),
+            "Content-Type": str(record.get("mime") or mimetypes.guess_type(name)[0] or "application/octet-stream"),
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{urllib.parse.quote(name)}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if not inline:
+            self.plugin._portal_audit("download", session["user"], file=name, file_id=artifact_id, client=self._client(request))
+        return web.FileResponse(path, headers=headers)
+
+
 @register(
     PLUGIN_ID,
     "OpenAI",
@@ -4417,8 +4806,13 @@ class NameSearcherPlugin(Star):
         self._model_review_task: Optional[asyncio.Task[Any]] = None
         self._model_review_resumed = False
         self._stop_epoch = 0
+        self.portal = PortalAuth()
+        self._portal_server = PortalServer(self)
+        self._portal_lock = threading.RLock()
+        self._portal_error = ""
         self.web_app = _build_web_app(self)
         self._register_page_apis()
+        self._schedule_portal_sync()
         self._try_register_webui()
         self._schedule_pending_uploads()
 
@@ -4652,6 +5046,8 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/model-review", self._page_model_review, ["POST"], "Queue vision/LLM recognition for stored files"),
             (f"/{PLUGIN_ID}/stop", self._page_stop_all, ["POST"], "Terminate all capture and recognition jobs"),
             (f"/{PLUGIN_ID}/find", self._page_find, ["POST"], "Find which files mention a person (wildcards allowed)"),
+            (f"/{PLUGIN_ID}/portal", self._page_portal_status, ["GET"], "Web query portal status, users and audit log"),
+            (f"/{PLUGIN_ID}/portal/revoke", self._page_portal_revoke, ["POST"], "Revoke a user's web query sessions"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -4805,6 +5201,15 @@ class NameSearcherPlugin(Star):
             ids = [rid for item in result.get("bundles", []) for rid in (item.get("record_ids") or [])]
             result["model_review"] = self.queue_model_review(ids)
         return _page_json_response(result)
+
+    async def _page_portal_status(self) -> Any:
+        if _as_bool(self.config.get("portal_enabled", False)) and not self._portal_server.running:
+            await self.sync_portal()
+        return _page_json_response(await asyncio.to_thread(self.portal_status))
+
+    async def _page_portal_revoke(self) -> Any:
+        payload = await _page_request_payload()
+        return _page_json_response({"revoked": self.portal.revoke_user(str(payload.get("user_id") or ""))})
 
     async def _page_find(self) -> Any:
         payload = await _page_request_payload()
@@ -4969,6 +5374,7 @@ class NameSearcherPlugin(Star):
     async def _page_save_config(self) -> Any:
         payload = await _page_request_payload()
         ignored = _apply_panel_config(self, payload)
+        await self.sync_portal()
         view = _panel_config_view(self)
         view["ignored_keys"] = ignored
         return _page_json_response(view)
@@ -5945,6 +6351,140 @@ class NameSearcherPlugin(Star):
     def _lookup_matches(self, name: str) -> list[dict[str, Any]]:
         return self.people.search(name, self._name_threshold())
 
+    # ---- public portal -------------------------------------------------
+    def _portal_session_minutes(self) -> float:
+        try:
+            return min(24 * 60.0, max(1.0, float(self.config.get("portal_session_minutes") or 30)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _portal_dir(self) -> Path:
+        path = self.store.root.parent / "portal"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _portal_audit(self, action: str, user: Mapping[str, Any], **details: Any) -> None:
+        entry = {"time": _now(), "action": action, **_portal_public_user(user), **{key: value for key, value in details.items() if value not in (None, "")}}
+        try:
+            with self._portal_lock, (self._portal_dir() / "audit.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            if action in {"find", "download", "login"}:
+                self._portal_touch_profile(user, action)
+        except OSError as exc:
+            _log("warning", "NameSearcher portal audit write failed: %s", exc)
+
+    def _portal_profiles(self) -> dict[str, Any]:
+        try:
+            data = json.loads((self._portal_dir() / "users.json").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _portal_touch_profile(self, user: Mapping[str, Any], action: str) -> None:
+        user_id = str(user.get("user_id") or "")
+        if not user_id:
+            return
+        with self._portal_lock:
+            profiles = self._portal_profiles()
+            profile = profiles.get(user_id) or {"user_id": user_id, "first_seen": _now(), "groups": [], "codes": 0, "logins": 0, "finds": 0, "downloads": 0}
+            profile["nickname"] = str(user.get("nickname") or profile.get("nickname") or "")
+            group_id = str(user.get("group_id") or "")
+            if group_id and group_id not in profile["groups"]:
+                profile["groups"].append(group_id)
+            counter = {"code": "codes", "login": "logins", "find": "finds", "download": "downloads"}.get(action)
+            if counter:
+                profile[counter] = int(profile.get(counter) or 0) + 1
+            profile["last_seen"] = _now()
+            profiles[user_id] = profile
+            path = self._portal_dir() / "users.json"
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(profiles, ensure_ascii=False, indent=1), encoding="utf-8")
+            temp.replace(path)
+
+    def portal_status(self, audit_limit: int = 50) -> dict[str, Any]:
+        audit: list[dict[str, Any]] = []
+        try:
+            lines = (self._portal_dir() / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-audit_limit:]
+            for line in reversed(lines):
+                try:
+                    audit.append(json.loads(line))
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        profiles = sorted(self._portal_profiles().values(), key=lambda item: str(item.get("last_seen") or ""), reverse=True)
+        return {
+            "enabled": _as_bool(self.config.get("portal_enabled", False)),
+            "running": self._portal_server.running,
+            "listen": "%s:%s" % self._portal_server.bound if self._portal_server.running else "",
+            "error": self._portal_error,
+            "public_url": str(self.config.get("portal_public_url") or ""),
+            "session_minutes": self._portal_session_minutes(),
+            "sessions": self.portal.active_sessions(),
+            "users": profiles[:100],
+            "audit": audit,
+        }
+
+    def portal_request_allowed(self, chat_type: str, chat_id: str, user_id: str) -> tuple[bool, str]:
+        if not _as_bool(self.config.get("portal_enabled", False)):
+            return False, "网页查询未开启"
+        users = _parse_allowed_ids(self.config.get("portal_allowed_users", ""))
+        groups = _parse_allowed_ids(self.config.get("portal_allowed_groups", ""))
+        if users and "*" not in users and user_id not in users:
+            return False, "你没有网页查询权限，请联系管理员"
+        if chat_type == "group":
+            if groups and "*" not in groups and chat_id not in groups:
+                return False, "本群未开放网页查询"
+            return True, ""
+        if not _as_bool(self.config.get("portal_allow_private", True)):
+            return False, "私聊申请未开放，请在群内发送"
+        return True, ""
+
+    def portal_issue_code(self, pair_code: str, chat_type: str, chat_id: str, user_id: str, nickname: str) -> str:
+        allowed, reason = self.portal_request_allowed(chat_type, chat_id, user_id)
+        if not allowed:
+            return reason
+        if not user_id:
+            return "无法识别你的账号，请稍后再试"
+        user = {"user_id": user_id, "nickname": nickname, "chat_type": chat_type, "group_id": chat_id if chat_type == "group" else ""}
+        result = self.portal.claim(pair_code, user)
+        if not result.get("ok"):
+            return str(result.get("error") or "申请失败")
+        self._portal_audit("code", user, pair_code=result["pair_code"])
+        minutes = max(1, int(result.get("expires_in", 0) // 60))
+        return (
+            f"验证码：{result['code']}\n"
+            f"仅对识别码 {result['pair_code']} 的查询页有效，{minutes} 分钟内输入；"
+            f"登录后可查询和下载 {int(self._portal_session_minutes())} 分钟。"
+        )
+
+    def _schedule_portal_sync(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.sync_portal())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def sync_portal(self) -> None:
+        """Start, stop or rebind the portal server to match the config."""
+
+        want = _as_bool(self.config.get("portal_enabled", False)) and not self._terminating
+        target = (str(self.config.get("portal_host") or "127.0.0.1").strip() or "127.0.0.1", int(self.config.get("portal_port") or 6197))
+        server = self._portal_server
+        if server.running and (not want or server.bound != target):
+            await server.stop()
+        if want and not server.running:
+            try:
+                await server.start()
+                self._portal_error = ""
+            except Exception as exc:
+                self._portal_error = f"网页查询服务启动失败：{exc}"
+                _log("error", "NameSearcher portal failed to start: %s", exc)
+        elif not want:
+            self._portal_error = ""
+
     def find_objects(self, query: str) -> dict[str, Any]:
         """Panel 查找对象: names (wildcards allowed) grouped with the files they appear in."""
 
@@ -6121,6 +6661,25 @@ class NameSearcherPlugin(Star):
         else:
             await self.capture_event(event)
 
+    @filter.command("验证码", alias={"查询码"})
+    async def portal_code(self, event: AstrMessageEvent, pair_code: str = ""):
+        code = _parse_command_text(event, "验证码", pair_code) or _parse_command_text(event, "查询码", pair_code)
+        code = re.sub(r"[^A-Za-z0-9]", "", code)
+        if not _as_bool(self.config.get("portal_enabled", False)):
+            yield _plain(event, "网页查询未开启")
+            return
+        if not code:
+            url = str(self.config.get("portal_public_url") or "").strip()
+            hint = f"请先打开查询页 {url} 获取识别码，" if url else "请先在查询页获取识别码，"
+            yield _plain(event, hint + "然后发送：/验证码 识别码")
+            return
+        if not self._portal_server.running:
+            await self.sync_portal()
+        chat_type, chat_id = _event_chat_identity(event)
+        user_id = str(_event_sender_id(event) or "")
+        nickname = str(_event_value(event, "get_sender_name", "sender_name") or "")
+        yield _plain(event, self.portal_issue_code(code, chat_type, chat_id, user_id, nickname))
+
     @filter.command("查找")
     async def find(self, event: AstrMessageEvent, name: str = ""):
         if not self.is_event_allowed(event):
@@ -6183,6 +6742,10 @@ class NameSearcherPlugin(Star):
     async def terminate(self) -> None:
         """AstrBot calls terminate on unload; indexes are already persisted atomically."""
         self._terminating = True
+        try:
+            await self._portal_server.stop()
+        except Exception as exc:
+            _log("debug", "NameSearcher portal stop failed: %s", exc)
         task = self._capture_window_task
         if task and not task.done():
             task.cancel()

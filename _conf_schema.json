@@ -345,5 +345,57 @@
     "type": "bool",
     "hint": "导入识别包后，在后台逐个用视觉模型识别并用 LLM 审核其中的图片和 PDF（需开启对应功能）。",
     "default": true
+  },
+  "portal_enabled": {
+    "description": "网页查询",
+    "type": "bool",
+    "default": false,
+    "hint": "开放网站临时查询和下载。查询页显示识别码，用户在允许的群或私聊发送 /验证码 识别码，机器人回复只对该页面有效的验证码。"
+  },
+  "portal_session_minutes": {
+    "description": "临时查询时限（分钟）",
+    "type": "int",
+    "default": 30,
+    "hint": "验证通过后可查询和下载的时长，1~1440。"
+  },
+  "portal_allowed_groups": {
+    "description": "可申请验证码的群聊 ID",
+    "type": "text",
+    "default": "",
+    "hint": "多个用逗号分隔；留空表示所有群。"
+  },
+  "portal_allowed_users": {
+    "description": "可申请验证码的用户 ID",
+    "type": "text",
+    "default": "",
+    "hint": "多个用逗号分隔；留空表示所有人。"
+  },
+  "portal_allow_private": {
+    "description": "允许私聊申请验证码",
+    "type": "bool",
+    "default": true
+  },
+  "portal_public_url": {
+    "description": "查询页地址",
+    "type": "string",
+    "default": "",
+    "hint": "用户只发 /验证码 时机器人回复此地址。"
+  },
+  "portal_allowed_origins": {
+    "description": "允许调用的网站（CORS）",
+    "type": "string",
+    "default": "https://20610728.xyz",
+    "hint": "多个用逗号分隔。"
+  },
+  "portal_host": {
+    "description": "网页查询监听地址",
+    "type": "string",
+    "default": "127.0.0.1",
+    "hint": "建议保持 127.0.0.1，由 Caddy/Nginx 反代。"
+  },
+  "portal_port": {
+    "description": "网页查询监听端口",
+    "type": "int",
+    "default": 6197
   }
 }

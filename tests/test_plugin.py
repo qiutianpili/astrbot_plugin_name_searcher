@@ -1,4 +1,5 @@
 import asyncio
+import re
 import base64
 import io
 import asyncio
@@ -320,6 +321,83 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertIn("王小明", text)
         self.assertIn("王小虎", text)
         self.assertIn("通配符", text)
+
+    def test_portal_pairing_verification_and_scoped_download(self):
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
+                             portal_enabled=True, portal_allowed_groups="111", portal_session_minutes=5)
+        record = plugin.store.add_bytes("名单.txt", b"x", kind="document", mime="text/plain", source={})
+        plugin.store.update(record["id"], download_status="ok", ocr_text="1 张三 计网")
+        other = plugin.store.add_bytes("其他.txt", b"y", kind="document", mime="text/plain", source={})
+        plugin.store.update(other["id"], download_status="ok", ocr_text="1 李四 会计")
+        challenge = plugin.portal.create_challenge("1.2.3.4")
+        pair = challenge["pair_code"]
+        self.assertIn("没有开放", plugin.portal_issue_code(pair, "group", "222", "9", "路人").replace("本群未开放", "没有开放"))
+        reply = plugin.portal_issue_code(pair.lower(), "group", "111", "42", "小明")
+        code = re.search(r"验证码：(\d{6})", reply).group(1)
+        self.assertIn("已被其他人", plugin.portal_issue_code(pair, "group", "111", "43", "小红"))
+        self.assertFalse(plugin.portal.verify("forged", code, 5)["ok"])
+        wrong = "000000" if code != "000000" else "111111"
+        self.assertEqual(plugin.portal.verify(challenge["challenge"], wrong, 5)["status"], 403)
+        session = plugin.portal.verify(challenge["challenge"], code, 5)
+        self.assertTrue(session["ok"])
+        self.assertEqual(session["expires_in"], 300)
+        self.assertFalse(plugin.portal.verify(challenge["challenge"], code, 5)["ok"])  # single use
+        self.assertEqual(session["user"]["user_id"], "42")
+        self.assertIsNotNone(plugin.portal.session(session["token"]))
+        plugin.config["portal_allowed_users"] = "7"
+        self.assertIn("没有网页查询权限", plugin.portal_issue_code("ABCDEF", "private", "42", "42", "小明"))
+        self.assertEqual(plugin.portal.revoke_user("42"), 1)
+        self.assertIsNone(plugin.portal.session(session["token"]))
+
+    def test_portal_http_endpoints(self):
+        try:
+            import aiohttp  # noqa: F401
+            from aiohttp.test_utils import TestClient, TestServer  # noqa: F401
+        except Exception:
+            self.skipTest("aiohttp unavailable")
+        import socket
+        sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
+                             portal_enabled=True, portal_port=port, portal_allowed_origins="https://example.org")
+        record = plugin.store.add_bytes("名单.txt", "张三".encode("utf-8"), kind="document", mime="text/plain", source={})
+        plugin.store.update(record["id"], download_status="ok", ocr_text="1 张三 计网")
+        other = plugin.store.add_bytes("其他.txt", b"secret", kind="document", mime="text/plain", source={})
+        plugin.store.update(other["id"], download_status="ok", ocr_text="1 李四 会计")
+
+        async def scenario():
+            import aiohttp
+            await plugin.sync_portal()
+            base = f"http://127.0.0.1:{port}/portal"
+            try:
+                async with aiohttp.ClientSession(headers={"Origin": "https://example.org"}) as http:
+                    async with http.post(base + "/challenge") as resp:
+                        self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "https://example.org")
+                        challenge = await resp.json()
+                    reply = plugin.portal_issue_code(challenge["pair_code"], "private", "42", "42", "小明")
+                    code = re.search(r"验证码：(\d{6})", reply).group(1)
+                    async with http.post(base + "/find", json={"query": "张*"}) as resp:
+                        self.assertEqual(resp.status, 401)
+                    async with http.post(base + "/verify", json={"challenge": challenge["challenge"], "code": code}) as resp:
+                        token = (await resp.json())["token"]
+                    auth = {"Authorization": f"Bearer {token}"}
+                    async with http.get(f"{base}/files/{other['id']}/content", headers=auth) as resp:
+                        self.assertEqual(resp.status, 403)
+                    async with http.post(base + "/find", json={"query": "张*"}, headers=auth) as resp:
+                        found = await resp.json()
+                    self.assertEqual(found["names"][0]["name"], "张三")
+                    self.assertNotIn("library", found["names"][0])
+                    async with http.get(f"{base}/files/{record['id']}/content", params={"token": token}) as resp:
+                        self.assertEqual(resp.status, 200)
+                        self.assertEqual((await resp.read()).decode("utf-8"), "张三")
+                        self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+            finally:
+                plugin._terminating = True
+                await plugin._portal_server.stop()
+
+        asyncio.run(scenario())
+        status = plugin.portal_status()
+        self.assertEqual([item["action"] for item in status["audit"]][:3], ["download", "find", "login"])
+        self.assertEqual(status["users"][0]["downloads"], 1)
 
     def test_pending_panel_upload_resumes_after_plugin_restart(self):
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)
