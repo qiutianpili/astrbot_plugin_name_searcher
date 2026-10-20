@@ -536,6 +536,38 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(records[0]["download_status"], "ok")
         self.assertEqual(records[0]["name"], "手作风铃.pdf")
 
+    def test_stop_all_terminates_capture_and_recognition(self):
+        files = []
+        for i in range(3):
+            path = self.temp_path / f"终止{i}.txt"
+            path.write_text(f"姓名：赵{i}", encoding="utf-8")
+            files.append(path)
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False, capture_interval_seconds=0)
+
+        async def scenario():
+            main._apply_panel_config(plugin, {"paused": True})
+            candidates = [main.AttachmentCandidate(name=p.name, kind="document", mime="text/plain", value=str(p), source={}) for p in files]
+            capture = asyncio.create_task(plugin._process_candidates(main.PanelUploadEvent(), candidates))
+            queued = plugin.store.add_bytes("待补跑.png", b"\x89PNG\r\n\x1a\n" + b"q" * 40, kind="image", mime="image/png", source={})
+            plugin.store.update(queued["id"], model_review_status="queued", processing_status="queued")
+            plugin._model_review_queue.append(queued["id"])
+            review = plugin._track_background_task(plugin._run_model_review_queue())
+            await asyncio.sleep(0.3)
+            result = await plugin.stop_all()
+            main._apply_panel_config(plugin, {"paused": False})
+            records = await asyncio.wait_for(capture, timeout=5)
+            return result, records, review.done(), plugin.store.get(queued["id"])
+
+        result, records, review_done, queued = asyncio.run(scenario())
+        self.assertTrue(result["ok"])
+        self.assertEqual(records, [])
+        self.assertEqual(plugin.store.list() and [item["name"] for item in plugin.store.list()], ["待补跑.png"])
+        self.assertTrue(review_done)
+        self.assertEqual(queued["model_review_status"], "cancelled")
+        self.assertEqual(queued["processing_status"], "cancelled")
+        self.assertEqual(plugin._model_review_queue, [])
+        self.assertFalse([p for p in plugin._progress_runs.values() if p.get("status") in {"running", "paused", "queued", "collecting"}])
+
     def test_panel_pause_stops_capture_and_holds_recognition(self):
         roster = self.temp_path / "暂停名单.txt"
         roster.write_text("姓名：王五", encoding="utf-8")

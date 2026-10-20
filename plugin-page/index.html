@@ -66,6 +66,8 @@
     .pause-toggle:hover { background: #f5f5f733; }
     .pause-toggle:active { transform: scale(.97); }
     .pause-toggle[aria-pressed="true"] { background: #ff9f0a; border-color: #ff9f0a; color: #1d1d1f; }
+    .pause-toggle.stop { color: #ff6961; }
+    .pause-toggle.stop.armed { background: #da2f35; border-color: #da2f35; color: #fff; }
     .pause-toggle:disabled { opacity: .6; cursor: progress; }
     .eyebrow.paused::before { background: #ff9f0a; box-shadow: 0 0 0 3px #ff9f0a33; animation: none; }
     .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #a1a1a6; flex: none; }
@@ -226,11 +228,11 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.9.0</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.9.1</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
-      <div class="hero-actions"><button id="pauseButton" class="pause-toggle" type="button" aria-pressed="false" title="暂停捕获和识别">暂停</button><div class="connection" aria-live="polite"><span id="connectionDot" class="status-dot"></span><span id="connectionLabel" class="connection-label">正在连接</span></div></div>
+      <div class="hero-actions"><button id="pauseButton" class="pause-toggle" type="button" aria-pressed="false" title="暂停捕获和识别">暂停</button><button id="stopButton" class="pause-toggle stop" type="button" title="终止所有正在进行和排队的捕获、识别任务">终止</button><div class="connection" aria-live="polite"><span id="connectionDot" class="status-dot"></span><span id="connectionLabel" class="connection-label">正在连接</span></div></div>
     </header>
 
     <section class="stats" aria-label="统计">
@@ -386,9 +388,11 @@
       const archiveStatusName = file => { const s = file.archive_extraction_status; if (!s) return '-'; const n = Number(file.archive_limited_count) || archiveErrors(file).filter(item => /未识别|未展开/.test(item)).length; if (archiveLimited(file) && s !== 'failed') return n ? `部分解压（${n} 个成员未识别）` : '部分解压'; return {extracted: '已解压', failed: '解压失败', empty: '空压缩包'}[s] || s; };
       const localModelStatus = file => { if (!isLocal(file) || file.extraction_status === 'failed') return ''; if (file.model_review_status === 'running') return '本地识别工具 · LLMs识别中'; if (file.model_review_status === 'queued') return '本地识别工具 · 等待LLMs识别'; const vision = file.vision_status === 'extracted'; const review = file.llm_review_status === 'completed'; return vision && review ? '本地识别工具+LLMs识别&审核' : vision ? '本地识别工具+LLMs识别' : review ? '本地识别工具+LLMs审核' : ''; };
       const failureReason = file => { const r = String(file.reason || ''); if (r === 'forward_file_unavailable') return '合并转发中的非图片文件，QQ 不提供下载，已提示发起人发送原文件'; if (r === 'no_download_url') return 'QQ 未提供下载地址'; if (r === 'too_large') return '超过单文件大小上限'; if (r.startsWith('capture_failed')) return `处理异常：${r.slice(15)}`; return r || '下载失败'; };
-      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.download_status === 'unavailable' ? '下载失败' : localModelStatus(file) ? localModelStatus(file) : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? (archiveLimited(file) ? '部分解压' : '仅保存') : '已捕获';
+      const statusName = file => file.processing_status === 'queued' ? '等待识别' : file.processing_status === 'running' ? '识别中' : file.processing_status === 'failed' ? '处理失败' : file.processing_status === 'cancelled' ? '已终止' : file.download_status === 'unavailable' ? '下载失败' : localModelStatus(file) ? localModelStatus(file) : file.extraction_status === 'extracted' ? '已识别' : file.extraction_status === 'failed' ? '识别失败' : file.extraction_status === 'no_text' ? '无可提取文本' : file.extraction_status === 'stored_only' ? (archiveLimited(file) ? '部分解压' : '仅保存') : '已捕获';
       const renderPause = () => { const paused = Boolean(state.config && (state.config.paused === true || state.config.paused === 'true')); const button = document.getElementById('pauseButton'); if (button) { button.textContent = paused ? '继续' : '暂停'; button.setAttribute('aria-pressed', String(paused)); button.title = paused ? '已暂停：点击继续捕获和识别' : '暂停捕获和识别'; } const eyebrow = document.getElementById('heroEyebrow'); if (eyebrow) eyebrow.classList.toggle('paused', paused); if (els.connection && els.dot && els.dot.classList.contains('online')) els.connection.textContent = paused ? '已暂停' : '服务已连接'; };
       const togglePause = async () => { const button = document.getElementById('pauseButton'); const next = !(state.config && (state.config.paused === true || state.config.paused === 'true')); if (button) button.disabled = true; try { const view = await request('/config', {method:'PATCH', body: JSON.stringify({paused: next})}); state.config = Object.assign({}, state.config, view && typeof view === 'object' ? view : {paused: next}); state.config.paused = next; renderPause(); toast(next ? '已暂停：不再捕获新附件，识别会在当前文件完成后暂停' : '已继续捕获和识别'); } catch (error) { showError(`${next ? '暂停' : '继续'}失败：${error.message}`); } finally { if (button) button.disabled = false; } };
+      let stopArmTimer = 0;
+      const stopAll = async () => { const button = document.getElementById('stopButton'); if (!button) return; if (!button.classList.contains('armed')) { button.classList.add('armed'); button.textContent = '确认终止'; clearTimeout(stopArmTimer); stopArmTimer = setTimeout(() => { button.classList.remove('armed'); button.textContent = '终止'; }, 3000); return; } clearTimeout(stopArmTimer); button.classList.remove('armed'); button.textContent = '终止'; button.disabled = true; try { const r = (await request('/stop', {method:'POST', body: JSON.stringify({})})) || {}; const n = (Number(r.cancelled_runs) || 0) + (Number(r.cancelled_records) || 0) + (Number(r.dropped_window_files) || 0); toast(n ? `已终止：${Number(r.cancelled_runs) || 0} 个任务，${Number(r.cancelled_records) || 0} 个文件停止识别${Number(r.dropped_window_files) ? `，丢弃 ${Number(r.dropped_window_files)} 个待捕获附件` : ''}` : '当前没有进行中的捕获或识别'); await loadFiles(); await loadProgress(); } catch (error) { showError(`终止失败：${error.message}`); } finally { button.disabled = false; } };
       const setConnection = online => { els.dot.className = `status-dot ${online ? 'online' : 'offline'}`; const eyebrow = document.getElementById('heroEyebrow'); if (eyebrow) { eyebrow.classList.toggle('online', online); eyebrow.classList.toggle('offline', !online); } els.connection.textContent = online ? '服务已连接' : '服务不可用'; if (online) renderPause(); };
       const showError = message => { els.error.textContent = message; els.error.hidden = !message; };
       let toastTimer;
@@ -547,7 +551,7 @@
           const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0)); const records = Array.isArray(progress.records) ? progress.records : [];
           els.progressPercent.textContent = `${percent}%`; els.progressMeter.value = percent;
           const stageNames = {collecting:'收集附件', downloading:'下载文件', extracting:'本地解析', vision_review:'视觉模型审核', waiting_memory:'内存不足，暂停中', paused:'已暂停（点“继续”恢复）', consensus:'多模型共识', llm_review:'LLM 审核', completed:'完成', failed:'失败', cancelled:'已取消'}; const stage = stageNames[progress.stage] || text(progress.stage); const current = [text(progress.current_file, ''), text(progress.current_model, '')].filter(Boolean).join(' · '); const windowEnd = progress.window_ends_at ? ` · 窗口至 ${formatDate(progress.window_ends_at)}` : '';
-          els.progressMeta.textContent = `${progress.status === 'completed' ? '已完成' : progress.status === 'running' ? '进行中' : progress.status === 'collecting' ? '捕获窗口收集中' : progress.status === 'paused' ? '已暂停' : text(progress.status)} · ${stage || '处理中'} · ${Number(progress.completed) || 0}/${Number(progress.total) || 0}${current ? ` · ${current}` : ''}${windowEnd}`;
+          els.progressMeta.textContent = `${progress.status === 'completed' ? '已完成' : progress.status === 'running' ? '进行中' : progress.status === 'collecting' ? '捕获窗口收集中' : progress.status === 'paused' ? '已暂停' : progress.status === 'cancelled' ? '已终止' : text(progress.status)} · ${stage || '处理中'} · ${Number(progress.completed) || 0}/${Number(progress.total) || 0}${current ? ` · ${current}` : ''}${windowEnd}`;
           const latest = new Set(records.flatMap(file => [fileId(file), `name:${fileName(file)}`].filter(Boolean))); const changed = latest.size !== state.latest.size || [...latest].some(key => !state.latest.has(key)); state.latest = latest; if (changed && els.sourceFilter.value === 'latest') render();
           els.progressFiles.textContent = `已捕获内容：${records.length ? records.map(file => fileName(file)).join('、') : '暂无'}`;
         } catch (_) { setConnection(false); els.progressMeta.textContent = '暂时无法读取捕获进度'; }
@@ -656,6 +660,7 @@
         finally { button.disabled = false; }
       }
       document.getElementById('pauseButton').addEventListener('click', togglePause);
+      document.getElementById('stopButton').addEventListener('click', stopAll);
       document.getElementById('refreshButton').addEventListener('click', () => { loadFiles(); loadProgress(); });
       document.getElementById('selectAllButton').addEventListener('click', () => { const all = state.filtered.length > 0 && state.filtered.every(file => state.selected.has(fileId(file))); state.filtered.forEach(file => all ? state.selected.delete(fileId(file)) : state.selected.add(fileId(file))); render(); });
       document.getElementById('deleteSelectedButton').addEventListener('click', () => removeFiles([...state.selected]));

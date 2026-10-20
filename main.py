@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.9.0"
+PLUGIN_VERSION = "1.9.1"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -3930,6 +3930,9 @@ class _FallbackPanelApp:
                 deleted = self.plugin.store.clear()
                 await self._json(send, {"deleted": deleted, "count": deleted})
                 return
+            if method == "POST" and path == "/stop":
+                await self._json(send, await self.plugin.stop_all())
+                return
             if method == "POST" and path == "/files/clear-failed":
                 if not self.plugin.config.get("allow_panel_delete", True):
                     await self._json(send, {"error": "panel delete disabled"}, 403)
@@ -4122,6 +4125,9 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         deleted = plugin.store.clear()
         return JSONResponse({"deleted": deleted, "count": deleted})
 
+    async def stop_all(_request: Any) -> JSONResponse:
+        return JSONResponse(await plugin.stop_all())
+
     async def cleanup_failed(_request: Any) -> JSONResponse:
         if not plugin.config.get("allow_panel_delete", True):
             return JSONResponse({"error": "panel delete disabled"}, status_code=403)
@@ -4165,6 +4171,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/files/delete", delete_files, methods=["POST", "DELETE"]),
         Route("/files/clear", cleanup, methods=["POST"]),
         Route("/files/clear-failed", cleanup_failed, methods=["POST"]),
+        Route("/stop", stop_all, methods=["POST"]),
         Route("/files/upload", upload_files, methods=["POST"]),
         Route("/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/files/{artifact_id}/preview", preview_file, methods=["GET"]),
@@ -4178,6 +4185,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/api/files/delete", delete_files, methods=["POST", "DELETE"]),
         Route("/api/files/clear", cleanup, methods=["POST"]),
         Route("/api/files/clear-failed", cleanup_failed, methods=["POST"]),
+        Route("/api/stop", stop_all, methods=["POST"]),
         Route("/api/files/upload", upload_files, methods=["POST"]),
         Route("/api/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/api/files/{artifact_id}/preview", preview_file, methods=["GET"]),
@@ -4232,6 +4240,7 @@ class NameSearcherPlugin(Star):
         self._model_review_queue: list[str] = []
         self._model_review_task: Optional[asyncio.Task[Any]] = None
         self._model_review_resumed = False
+        self._stop_epoch = 0
         self.web_app = _build_web_app(self)
         self._register_page_apis()
         self._try_register_webui()
@@ -4465,6 +4474,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/import/finish", self._page_import_finish, ["POST"], "Import an uploaded recognition bundle"),
             (f"/{PLUGIN_ID}/import/scan", self._page_import_scan, ["POST"], "Import bundles from the inbox folder"),
             (f"/{PLUGIN_ID}/model-review", self._page_model_review, ["POST"], "Queue vision/LLM recognition for stored files"),
+            (f"/{PLUGIN_ID}/stop", self._page_stop_all, ["POST"], "Terminate all capture and recognition jobs"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -4619,6 +4629,9 @@ class NameSearcherPlugin(Star):
             result["model_review"] = self.queue_model_review(ids)
         return _page_json_response(result)
 
+    async def _page_stop_all(self) -> Any:
+        return _page_json_response(await self.stop_all())
+
     async def _page_model_review(self) -> Any:
         payload = await _page_request_payload()
         ids = payload.get("ids")
@@ -4701,7 +4714,8 @@ class NameSearcherPlugin(Star):
         event.sender_name = "视觉模型补跑"
         progress_id = ""
         try:
-            while self._model_review_queue and not self._terminating:
+            epoch = self._stop_epoch
+            while self._model_review_queue and not self._terminating and self._stop_epoch == epoch:
                 if not progress_id:
                     progress_id = self._start_progress(event, [], status="running")
                     self._update_progress(progress_id, advance=False, stage="vision_review", kind="model_review")
@@ -5417,9 +5431,13 @@ class NameSearcherPlugin(Star):
         records: list[dict[str, Any]] = []
         seen_record_ids: set[str] = set()
         queue = list(candidates)
+        epoch = self._stop_epoch
         while queue:
             candidate = queue.pop(0)
             await self._wait_if_paused(progress_id, candidate.name)
+            if self._stop_epoch != epoch:
+                self._update_progress(progress_id, advance=False, status="cancelled", stage="cancelled", current_file="", current_model="")
+                return records
             await self._wait_for_memory(progress_id, candidate.name)
             self._update_progress(
                 progress_id,
@@ -5628,6 +5646,64 @@ class NameSearcherPlugin(Star):
 
     def _paused(self) -> bool:
         return _as_bool(self.config.get("paused", False))
+
+    async def stop_all(self) -> dict[str, Any]:
+        """Terminate every capture and recognition job that is waiting or running.
+
+        Files already saved stay in the library; unfinished plugin-page uploads
+        and model reviews are marked cancelled so they are not resumed on the
+        next start. New messages are still captured unless the plugin is paused.
+        """
+
+        self._stop_epoch += 1
+        async with self._capture_window_lock:
+            dropped = sum(len(items) for _event, items in self._capture_window_entries)
+            self._capture_window_entries = []
+            window_task = self._capture_window_task
+            self._capture_window_task = None
+            self._capture_window_progress_id = ""
+        current = asyncio.current_task()
+        tasks = [task for task in [window_task, *self._background_tasks] if task is not None and not task.done() and task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        review_count = len(self._model_review_queue)
+        self._model_review_queue.clear()
+        self._model_review_task = None
+        self._scheduled_upload_ids.clear()
+        self._processing_upload_ids.clear()
+        self._resume_scheduled = False
+        cancelled_records = 0
+        for record in self.store.list():
+            updates: dict[str, Any] = {}
+            if record.get("processing_status") in {"queued", "running"}:
+                updates.update(processing_status="cancelled", processing_error="已在插件页终止", processing_updated_at=_now())
+            if record.get("model_review_status") in {"queued", "running"}:
+                updates["model_review_status"] = "cancelled"
+            if updates:
+                self.store.update(str(record.get("id")), **updates)
+                cancelled_records += 1
+        cancelled_runs = 0
+        with self._progress_lock:
+            for progress in self._progress_runs.values():
+                if progress.get("status") in {"queued", "collecting", "running", "paused"}:
+                    progress["status"] = "cancelled"
+                    progress["stage"] = "cancelled"
+                    progress["current_file"] = ""
+                    progress["current_model"] = ""
+                    progress["updated_at"] = _now()
+                    cancelled_runs += 1
+        _log("info", "NameSearcher stopped all jobs: %s tasks, %s runs, %s records, %s window files, %s reviews",
+             len(tasks), cancelled_runs, cancelled_records, dropped, review_count)
+        return {
+            "ok": True,
+            "cancelled_tasks": len(tasks),
+            "cancelled_runs": cancelled_runs,
+            "cancelled_records": cancelled_records,
+            "dropped_window_files": dropped,
+            "cancelled_model_reviews": review_count,
+        }
 
     async def _wait_if_paused(self, progress_id: str = "", current: str = "") -> None:
         """Hold recognition between files while the panel has paused the plugin."""
