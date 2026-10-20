@@ -93,6 +93,21 @@
     .progress-meter::-moz-progress-bar { background: var(--fill-primary); border-radius: var(--r-pill); }
 
     /* workbench */
+    .finder { margin-bottom: 16px; border-radius: var(--r-l); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); overflow: hidden; }
+    .finder-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; padding: 18px 20px 0; }
+    .finder-hint { font-size: 12px; color: var(--text-secondary); }
+    .finder .toolbar { border-bottom: 0; }
+    .find-summary { padding: 0 20px 10px; font-size: 13px; color: var(--text-secondary); }
+    .find-results { display: grid; gap: 8px; padding: 0 16px 16px; max-height: 420px; overflow: auto; }
+    .find-results:empty { display: none; }
+    .find-row { padding: 12px 14px; border-radius: var(--r-m); background: var(--fill-on); border: 1px solid var(--stroke-2); }
+    .find-name { display: flex; align-items: baseline; gap: 8px; font: 600 15px/1.3 var(--sans); }
+    .find-count { font: 500 12px/1 var(--sans); color: var(--text-secondary); }
+    .find-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .find-chip { max-width: 100%; padding: 6px 12px; border-radius: var(--r-pill); border: 1px solid var(--stroke); background: var(--fill-card); color: var(--text-primary); font: 500 12px/1.3 var(--sans); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background var(--dur) var(--ease-out); }
+    .find-chip:hover { background: var(--fill-tertiary); }
+    .find-line { margin-top: 6px; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .find-empty { padding: 4px 4px 0; font-size: 13px; color: var(--text-secondary); }
     .workbench { border-radius: var(--r-l); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); overflow: hidden; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--stroke-2); }
     .search { position: relative; flex: 1 1 260px; min-width: 200px; }
@@ -228,7 +243,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.9.1</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.10.0</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -245,6 +260,18 @@
     <section class="capture-progress" aria-label="捕获进度">
       <div><div class="progress-title"><strong>最近捕获任务</strong><span id="capturePercent" class="progress-percent">0%</span></div><div id="captureMeta" class="progress-meta">当前没有捕获任务</div></div>
       <div><progress id="captureMeter" class="progress-meter" max="100" value="0"></progress><div id="captureFiles" class="progress-files">已捕获内容：暂无</div></div>
+    </section>
+
+    <section class="finder" aria-label="查找对象">
+      <div class="finder-head"><h2 class="section-title">查找对象</h2><span class="finder-hint">输入姓名或昵称，筛选出其所在文件；支持通配符：张* 、王小?（* 表示一个或多个字，? 表示一个字）</span></div>
+      <form id="findForm" class="toolbar" autocomplete="off">
+        <div class="search"><span class="search-mark" aria-hidden="true">⌕</span><input id="findInput" type="search" maxlength="64" placeholder="如 张三、张*、王小?" aria-label="查找对象"></div>
+        <button id="findButton" class="button primary" type="submit">查找</button>
+        <button id="findFilterButton" class="button" type="button" disabled title="文件列表只显示查找结果中的文件">只看这些文件</button>
+        <button id="findClearButton" class="button" type="button">清除</button>
+      </form>
+      <div id="findSummary" class="find-summary" hidden></div>
+      <div id="findResults" class="find-results"></div>
     </section>
 
     <section class="workbench" aria-label="文件管理">
@@ -457,7 +484,8 @@
           const typeMatch = typeWanted === 'all' || typeName(file) === typeWanted;
           const sourceMatch = sourceWanted === 'all' || (sourceWanted === 'upload' ? isUpload(file) : sourceWanted === 'local' ? isLocal(file) : sourceWanted === 'chat' ? !isUpload(file) && !isLocal(file) : state.latest.has(fileId(file)) || state.latest.has(`name:${fileName(file)}`));
           const textMatch = !query || [fileName(file), typeName(file), statusName(file), source(file), text(file.format), text(file.mime_type || file.mime), text(file.ocr_excerpt)].join(' ').toLowerCase().includes(query);
-          return statusMatch && typeMatch && sourceMatch && textMatch; });
+          const findMatch = !state.findIds || state.findIds.has(fileId(file));
+          return statusMatch && typeMatch && sourceMatch && textMatch && findMatch; });
         if (state.sort) { const dir = state.sort === 'desc' ? -1 : 1; state.filtered = [...state.filtered].sort((a, b) => dir * nameCollator.compare(fileName(a), fileName(b))); }
         const sortButton = document.getElementById('nameSortButton');
         if (sortButton) { sortButton.dataset.sort = state.sort; sortButton.querySelector('.sort-arrow').textContent = state.sort === 'asc' ? '↑' : state.sort === 'desc' ? '↓' : '↕'; sortButton.setAttribute('aria-label', `按文件名排序，当前${state.sort === 'asc' ? '升序' : state.sort === 'desc' ? '降序' : '默认顺序'}`); sortButton.title = state.sort === 'asc' ? '文件名升序（点一下改降序）' : state.sort === 'desc' ? '文件名降序（点一下恢复默认）' : '按文件名排序'; }
@@ -729,6 +757,37 @@
       els.search.addEventListener('input', render);
       [els.statusFilter, els.typeFilter, els.sourceFilter].forEach(select => select.addEventListener('change', () => { state.expanded = false; render(); }));
       els.list.addEventListener('change', event => { const checkbox = event.target.closest('[data-select]'); if (!checkbox) return; const id = checkbox.dataset.select; checkbox.checked ? state.selected.add(id) : state.selected.delete(id); updateStats(); });
+      const findEls = { form: document.getElementById('findForm'), input: document.getElementById('findInput'), button: document.getElementById('findButton'), filter: document.getElementById('findFilterButton'), clear: document.getElementById('findClearButton'), summary: document.getElementById('findSummary'), results: document.getElementById('findResults') };
+      state.findIds = null; state.findResultIds = [];
+      const setFindFilter = ids => { state.findIds = ids ? new Set(ids) : null; findEls.filter.textContent = state.findIds ? '显示全部文件' : '只看这些文件'; state.expanded = Boolean(state.findIds); render(); };
+      const renderFind = result => {
+        const names = Array.isArray(result && result.names) ? result.names : [];
+        state.findResultIds = [...new Set(names.flatMap(group => (group.files || []).map(item => String(item.id))))];
+        findEls.filter.disabled = state.findResultIds.length === 0;
+        findEls.summary.hidden = false;
+        if (!result || result.ok === false) { findEls.summary.textContent = text(result && result.message, '查找失败'); findEls.results.innerHTML = ''; return; }
+        if (!names.length) { findEls.summary.textContent = `未找到“${text(result.query)}”。${result.wildcard ? '* 表示一个或多个字，? 表示一个字。' : '可以试试通配符，如 张*。'}`; findEls.results.innerHTML = ''; return; }
+        const more = Number(result.truncated) ? `，另有 ${Number(result.truncated)} 个姓名未显示，请缩小范围` : '';
+        findEls.summary.textContent = `${result.wildcard ? '通配符' : '姓名'}“${text(result.query)}”：${Number(result.name_count) || names.length} 个姓名，涉及 ${Number(result.file_count) || state.findResultIds.length} 个文件${more}。点文件名可预览。`;
+        findEls.results.innerHTML = names.map(group => {
+          const files = Array.isArray(group.files) ? group.files : []; const library = Array.isArray(group.library) ? group.library : [];
+          const chips = files.map(item => `<button class="find-chip" type="button" data-find-file="${escape(item.id)}" title="${escape(text(item.line, ''))}">${escape(text(item.name, '未命名文件'))}</button>`).join('') + (library.length ? '<span class="find-chip" aria-disabled="true">人员库</span>' : '');
+          const line = files.length === 1 && files[0].line ? `<div class="find-line">${escape(files[0].line)}</div>` : '';
+          return `<div class="find-row"><div class="find-name">${escape(text(group.name))}<span class="find-count">${files.length} 个文件</span></div><div class="find-files">${chips || '<span class="find-empty">仅人员库记录</span>'}</div>${line}</div>`;
+        }).join('');
+      };
+      const runFind = async () => {
+        const query = findEls.input.value.trim();
+        if (!query) { findEls.input.focus(); return; }
+        findEls.button.disabled = true; findEls.button.textContent = '查找中…';
+        try { const result = await request('/find', {method: 'POST', body: JSON.stringify({query})}); renderFind(result || {}); if (state.findIds) setFindFilter(state.findResultIds); }
+        catch (error) { showError(`查找失败：${error.message}`); }
+        finally { findEls.button.disabled = false; findEls.button.textContent = '查找'; }
+      };
+      findEls.form.addEventListener('submit', event => { event.preventDefault(); runFind(); });
+      findEls.filter.addEventListener('click', () => setFindFilter(state.findIds ? null : state.findResultIds));
+      findEls.clear.addEventListener('click', () => { findEls.input.value = ''; findEls.results.innerHTML = ''; findEls.summary.hidden = true; state.findResultIds = []; findEls.filter.disabled = true; setFindFilter(null); });
+      findEls.results.addEventListener('click', event => { const chip = event.target.closest('[data-find-file]'); if (!chip) return; const file = findFile(chip.dataset.findFile); if (file) showPreview(file); else toast('文件列表还没有这个文件，请先刷新'); });
       els.list.addEventListener('click', event => { if (event.target.closest('[data-collapse]')) { state.expanded = !state.expanded; render(); return; } const preview = event.target.closest('[data-preview]'); const remove = event.target.closest('[data-delete]'); if (preview) showPreview(findFile(preview.dataset.preview)); if (remove) removeFiles([remove.dataset.delete]); });
       els.list.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const card = event.target.closest('.file-card'); if (card && event.target === card) { event.preventDefault(); showPreview(findFile(card.dataset.id)); } });
       document.getElementById('closePreviewButton').addEventListener('click', closePreview); els.dialog.addEventListener('click', event => { if (event.target === els.dialog) closePreview(); });

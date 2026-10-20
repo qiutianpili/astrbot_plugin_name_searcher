@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.9.1"
+PLUGIN_VERSION = "1.10.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -416,6 +416,88 @@ def _name_match_strength(text: str, query: str) -> str:
     # Fall back to the punctuation-free key for heavily mangled model output.
     query_key = _search_key(query)
     return "partial" if query_key and query_key in _search_key(text) else ""
+
+
+_WILDCARD_MAP = str.maketrans({"＊": "*", "？": "?", "﹡": "*", "×": "*"})
+_CJK_CLASS = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ffff"
+_NAME_LABEL_LOOKBEHIND = r"(?<=姓名)|(?<=名字)|(?<=学生)|(?<=同学)"
+WILDCARD_MAX_NAMES = 200
+
+
+def _normalise_wildcard(query: Any) -> str:
+    return re.sub(r"[\s\u3000]+", "", str(query or "").translate(_WILDCARD_MAP))
+
+
+def _has_wildcard(query: Any) -> bool:
+    text = _normalise_wildcard(query)
+    return "*" in text or "?" in text
+
+
+def _wildcard_pattern(query: Any) -> Optional[re.Pattern[str]]:
+    """Compile a name wildcard: ``*`` = one or more name characters, ``?`` = exactly one.
+
+    Chinese names only grow through CJK characters (``张*`` → 张三 / 张三丰, at most
+    four characters in total unless the literal part is longer); Latin names grow
+    through letters.  A match must start and end on a name boundary so 主张 / 张贴
+    inside longer words are not reported.  Returns None without a literal part.
+    """
+
+    text = _normalise_wildcard(query)
+    literal = [char for char in text if char not in "*?"]
+    if not literal or not all(char.isalnum() or char in "·." for char in literal):
+        return None
+    cjk = any(_CJK_CHAR.match(char) for char in literal)
+    name_char = f"[{_CJK_CLASS}]" if cjk else "[A-Za-z]"
+    parts: list[str] = []
+    for char in text:
+        if char == "*":
+            parts.append(f"{name_char}{{1,3}}" if cjk else f"{name_char}+")
+        elif char == "?":
+            parts.append(name_char)
+        else:
+            parts.append(re.escape(char))
+    core = "".join(parts)
+    if cjk:
+        pattern = f"(?:(?<![{_CJK_CLASS}])|{_NAME_LABEL_LOOKBEHIND})({core})(?![{_CJK_CLASS}])"
+    else:
+        pattern = f"(?<![A-Za-z])({core})(?![A-Za-z])"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _wildcard_names(text: Any, pattern: re.Pattern[str], query: Any) -> list[tuple[str, str]]:
+    """Return (name, line) pairs for every distinct wildcard hit in ``text``."""
+
+    literal_len = len([char for char in _normalise_wildcard(query) if char not in "*?"])
+    limit = max(4, literal_len + 2)
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in _visible_model_text(text).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for match in pattern.finditer(stripped):
+            name = match.group(1)
+            if _CJK_CHAR.match(name[0]) and len(name) > limit:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((name, stripped[:300]))
+    return found
+
+
+def _wildcard_text_sections(record: Mapping[str, Any]) -> list[str]:
+    """Final (reviewed) texts only: raw OCR before review is too noisy to list names from."""
+
+    texts: list[str] = []
+    for key in ("ocr_text", "vision_consensus_text", "llm_review_text"):
+        value = str(record.get(key) or "").strip()
+        if value and value not in texts:
+            texts.append(value)
+    if not texts:
+        texts = [text for _, text in _artifact_search_sections(record)]
+    return texts
 
 
 def _mime_for(path: Path, hint: str = "") -> str:
@@ -2833,6 +2915,56 @@ class PeopleIndex:
             matches.append({"record": details, "score": score, "source": record, "strength": strength})
         return matches
 
+    def wildcard_search(self, query: str, limit: int = WILDCARD_MAX_NAMES) -> dict[str, Any]:
+        """Group every name matching a wildcard query with the files it appears in."""
+
+        pattern = _wildcard_pattern(query)
+        if pattern is None:
+            return {"ok": False, "query": query, "wildcard": True, "names": [], "message": "通配符前后至少要有一个字，例如 张* 或 王小?"}
+        groups: dict[str, dict[str, Any]] = {}
+
+        def group_for(name: str) -> dict[str, Any]:
+            key = _normalise_name(name)
+            if key not in groups:
+                groups[key] = {"name": name, "files": [], "library": []}
+            return groups[key]
+
+        for record in self._records:
+            name = str(record.get("姓名") or record.get("name") or record.get("姓名/名称") or "").strip()
+            if not name:
+                continue
+            if any(_normalise_name(hit) == _normalise_name(name) for hit, _ in _wildcard_names(name, pattern, query)):
+                group_for(name)["library"].append(dict(record))
+        for record in self.store.list():
+            record_id = str(record.get("id") or "")
+            if not record_id or record.get("download_status") != "ok":
+                continue
+            seen_here: set[str] = set()
+            for text in _wildcard_text_sections(record):
+                for name, line in _wildcard_names(text, pattern, query):
+                    key = _normalise_name(name)
+                    if key in seen_here:
+                        continue
+                    seen_here.add(key)
+                    group_for(name)["files"].append({
+                        "id": record_id,
+                        "name": str(record.get("name") or "未命名文件"),
+                        "line": line,
+                        "kind": record.get("kind"),
+                        "reviewed": record.get("llm_review_status") == "completed",
+                    })
+        names = sorted(groups.values(), key=lambda item: (-len(item["files"]) - len(item["library"]), item["name"]))
+        total_files = len({item["id"] for group in names for item in group["files"]})
+        return {
+            "ok": True,
+            "query": query,
+            "wildcard": True,
+            "names": names[:limit],
+            "name_count": len(names),
+            "file_count": total_files,
+            "truncated": max(0, len(names) - limit),
+        }
+
     def search(self, query: str, threshold: float = 0.85) -> list[dict[str, Any]]:
         """Exact name hits first.  Near-miss names (王小明 vs 王小红) are no
         longer treated as matches: fuzzy library hits need ``threshold`` and are
@@ -3544,6 +3676,31 @@ def _encoding_notice(records: Iterable[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_wildcard_result(result: Mapping[str, Any], max_names: int = 30) -> str:
+    query = str(result.get("query") or "")
+    if not result.get("ok"):
+        return str(result.get("message") or "通配符格式不正确")
+    names = list(result.get("names") or [])
+    if not names:
+        return f"未找到匹配“{query}”的姓名。* 表示一个或多个字，? 表示一个字。"
+    lines = [
+        f"查找对象：{query}（通配符）",
+        f"匹配姓名：{result.get('name_count', len(names))} 个，涉及 {result.get('file_count', 0)} 个文件",
+    ]
+    for index, group in enumerate(names[:max_names], 1):
+        files = list(group.get("files") or [])
+        file_names = list(dict.fromkeys(str(item.get("name") or "未命名文件") for item in files))
+        shown = "、".join(file_names[:3]) + (f" 等 {len(file_names)} 个文件" if len(file_names) > 3 else "")
+        if group.get("library"):
+            shown = (shown + "；" if shown else "") + "人员库"
+        lines.append(f"{index}. {group.get('name')}：{shown or '无文件'}")
+    hidden = int(result.get("name_count") or len(names)) - min(len(names), max_names)
+    if hidden > 0:
+        lines.append(f"另有 {hidden} 个姓名未显示，请缩小范围（如 王小*）或在插件面板“查找对象”中查看全部。")
+    lines.append("查看某人详情：/查找 完整姓名")
+    return "\n".join(lines)
+
+
 def _format_result(query: str, matches: list[dict[str, Any]], resource_base: str = "", hidden_partial: int = 0) -> str:
     if not matches:
         return f"未找到“{query}”。请确认姓名，或先发送包含名单的文档/图片。"
@@ -3933,6 +4090,15 @@ class _FallbackPanelApp:
             if method == "POST" and path == "/stop":
                 await self._json(send, await self.plugin.stop_all())
                 return
+            if method == "POST" and path == "/find":
+                raw = await self._body(receive)
+                try:
+                    payload = json.loads(raw or b"{}")
+                except ValueError:
+                    payload = {}
+                query = str(payload.get("query") or payload.get("q") or "") if isinstance(payload, Mapping) else ""
+                await self._json(send, await asyncio.to_thread(self.plugin.find_objects, query))
+                return
             if method == "POST" and path == "/files/clear-failed":
                 if not self.plugin.config.get("allow_panel_delete", True):
                     await self._json(send, {"error": "panel delete disabled"}, 403)
@@ -4128,6 +4294,14 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
     async def stop_all(_request: Any) -> JSONResponse:
         return JSONResponse(await plugin.stop_all())
 
+    async def find_objects(request: Any) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        query = str(payload.get("query") or payload.get("q") or "") if isinstance(payload, Mapping) else ""
+        return JSONResponse(await asyncio.to_thread(plugin.find_objects, query))
+
     async def cleanup_failed(_request: Any) -> JSONResponse:
         if not plugin.config.get("allow_panel_delete", True):
             return JSONResponse({"error": "panel delete disabled"}, status_code=403)
@@ -4172,6 +4346,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/files/clear", cleanup, methods=["POST"]),
         Route("/files/clear-failed", cleanup_failed, methods=["POST"]),
         Route("/stop", stop_all, methods=["POST"]),
+        Route("/find", find_objects, methods=["POST"]),
         Route("/files/upload", upload_files, methods=["POST"]),
         Route("/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/files/{artifact_id}/preview", preview_file, methods=["GET"]),
@@ -4186,6 +4361,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/api/files/clear", cleanup, methods=["POST"]),
         Route("/api/files/clear-failed", cleanup_failed, methods=["POST"]),
         Route("/api/stop", stop_all, methods=["POST"]),
+        Route("/api/find", find_objects, methods=["POST"]),
         Route("/api/files/upload", upload_files, methods=["POST"]),
         Route("/api/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/api/files/{artifact_id}/preview", preview_file, methods=["GET"]),
@@ -4475,6 +4651,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/import/scan", self._page_import_scan, ["POST"], "Import bundles from the inbox folder"),
             (f"/{PLUGIN_ID}/model-review", self._page_model_review, ["POST"], "Queue vision/LLM recognition for stored files"),
             (f"/{PLUGIN_ID}/stop", self._page_stop_all, ["POST"], "Terminate all capture and recognition jobs"),
+            (f"/{PLUGIN_ID}/find", self._page_find, ["POST"], "Find which files mention a person (wildcards allowed)"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -4627,6 +4804,11 @@ class NameSearcherPlugin(Star):
         if _as_bool(self.config.get("import_model_review", True)):
             ids = [rid for item in result.get("bundles", []) for rid in (item.get("record_ids") or [])]
             result["model_review"] = self.queue_model_review(ids)
+        return _page_json_response(result)
+
+    async def _page_find(self) -> Any:
+        payload = await _page_request_payload()
+        result = await asyncio.to_thread(self.find_objects, str(payload.get("query") or payload.get("q") or ""))
         return _page_json_response(result)
 
     async def _page_stop_all(self) -> Any:
@@ -5763,6 +5945,43 @@ class NameSearcherPlugin(Star):
     def _lookup_matches(self, name: str) -> list[dict[str, Any]]:
         return self.people.search(name, self._name_threshold())
 
+    def find_objects(self, query: str) -> dict[str, Any]:
+        """Panel 查找对象: names (wildcards allowed) grouped with the files they appear in."""
+
+        query = str(query or "").strip()[:64]
+        if not query:
+            return {"ok": False, "query": "", "names": [], "message": "请输入要查找的姓名或昵称"}
+        if _has_wildcard(query):
+            return self.people.wildcard_search(query)
+        matches = self._lookup_matches(query)
+        groups: dict[str, dict[str, Any]] = {}
+        for item in matches:
+            record = item.get("record") if isinstance(item.get("record"), Mapping) else {}
+            source = item.get("source") if isinstance(item.get("source"), Mapping) else {}
+            strength = str(item.get("strength") or "exact")
+            label = query if strength == "exact" else f"{query}（{'近似' if strength == 'fuzzy' else '包含'}匹配）"
+            group = groups.setdefault(label, {"name": label, "strength": strength, "files": [], "library": []})
+            if source.get("id"):
+                group["files"].append({
+                    "id": str(source.get("id")),
+                    "name": str(source.get("name") or "未命名文件"),
+                    "line": str(record.get("识别行") or "")[:300],
+                    "kind": source.get("kind"),
+                    "reviewed": source.get("llm_review_status") == "completed",
+                })
+            else:
+                group["library"].append(dict(record))
+        names = list(groups.values())
+        return {
+            "ok": True,
+            "query": query,
+            "wildcard": False,
+            "names": names,
+            "name_count": len(names),
+            "file_count": len({entry["id"] for group in names for entry in group["files"]}),
+            "truncated": 0,
+        }
+
     def _resource_chain(self, event: Any, matches: list[dict[str, Any]]) -> Any:
         """Build a native message chain containing matched local resources."""
 
@@ -5908,7 +6127,10 @@ class NameSearcherPlugin(Star):
             return
         query = _parse_command_text(event, "查找", name)
         if not query:
-            yield _plain(event, "用法：/查找 姓名")
+            yield _plain(event, "用法：/查找 姓名（支持通配符：/查找 张* 、/查找 王小?）")
+            return
+        if _has_wildcard(query):
+            yield _plain(event, _format_wildcard_result(self.people.wildcard_search(query)))
             return
         matches = self._lookup_matches(query)
         if _as_bool(self.config.get("merged_forward_results", False)):

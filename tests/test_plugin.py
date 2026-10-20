@@ -296,6 +296,31 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(plugin.store.list()[0]["processing_status"], "completed")
         self.assertIn("排队测试", plugin._lookup("排队测试"))
 
+    def test_wildcard_find_lists_names_and_files(self):
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)
+        first = plugin.store.add_bytes("名单一.txt", b"x1", kind="document", mime="text/plain", source={})
+        plugin.store.update(first["id"], download_status="ok", extraction_status="extracted",
+                            ocr_text="序号 姓名 班级\n1 张三 计网253-1\n2 王小明 会计243-2\n主张张贴通知")
+        second = plugin.store.add_bytes("名单二.txt", b"x2", kind="document", mime="text/plain", source={})
+        plugin.store.update(second["id"], download_status="ok", extraction_status="extracted",
+                            ocr_text="张三丰，王小虎，王大锤，木克么日则")
+        result = plugin.find_objects("张*")
+        names = {group["name"]: group for group in result["names"]}
+        self.assertTrue(result["wildcard"])
+        self.assertEqual(set(names), {"张三", "张三丰"})
+        self.assertEqual(names["张三"]["files"][0]["name"], "名单一.txt")
+        self.assertEqual({group["name"] for group in plugin.find_objects("王小?")["names"]}, {"王小明", "王小虎"})
+        self.assertEqual({group["name"] for group in plugin.find_objects("王小＊")["names"]}, {"王小明", "王小虎"})
+        self.assertEqual([group["name"] for group in plugin.find_objects("木克么*")["names"]], ["木克么日则"])
+        self.assertFalse(plugin.find_objects("*")["ok"])
+        plain = plugin.find_objects("王大锤")
+        self.assertFalse(plain["wildcard"])
+        self.assertEqual(plain["names"][0]["files"][0]["name"], "名单二.txt")
+        text = main._format_wildcard_result(plugin.people.wildcard_search("王小*"))
+        self.assertIn("王小明", text)
+        self.assertIn("王小虎", text)
+        self.assertIn("通配符", text)
+
     def test_pending_panel_upload_resumes_after_plugin_restart(self):
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)
         record = plugin.store.add_bytes(
