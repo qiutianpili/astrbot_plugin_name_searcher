@@ -536,6 +536,38 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(records[0]["download_status"], "ok")
         self.assertEqual(records[0]["name"], "手作风铃.pdf")
 
+    def test_multi_level_nested_forwards_are_captured(self):
+        images = []
+        for i in range(5):
+            path = self.temp_path / f"layer{i}.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([i + 1]) * 40)
+            images.append(path)
+
+        def node(i, inner=None, ref=None):
+            message = [{"type": "image", "data": {"file": images[i].name, "url": str(images[i])}}]
+            if inner is not None or ref:
+                data = {"id": ref or f"in-{i + 1}"}
+                if inner is not None:
+                    data["content"] = inner
+                message.append({"type": "forward", "data": data})
+            return [{"sender": {"user_id": i, "nickname": f"第{i}层"}, "message": message}]
+
+        inline = node(0, node(1, node(2, node(3, node(4)))))
+        for mode in ("inline", "by-id"):
+            class Bot:
+                async def call_action(self, *, action, **kwargs):
+                    if mode == "inline":
+                        return {"data": {"messages": inline}} if kwargs.get("message_id") == "root" else None
+                    index = int(str(kwargs.get("message_id")).split("-")[1])
+                    return {"data": {"messages": node(index, ref=f"id-{index + 1}" if index < 4 else None)}}
+
+            event = FakeEvent([{"type": "forward", "data": {"id": "root" if mode == "inline" else "id-0"}}])
+            event.bot = Bot()
+            plugin = make_plugin(self.temp_path / mode, capture_progress_notify=False)
+            with patch.object(main, "_read_text_from_file", return_value=("", 0.0)):
+                records = asyncio.run(plugin.capture_event(event))
+            self.assertEqual(sorted(item["name"] for item in records), [f"layer{i}.png" for i in range(5)], mode)
+
     def test_forward_non_image_files_get_quoted_notice_and_failed_record(self):
         image = self.temp_path / "roster.png"
         image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 40)

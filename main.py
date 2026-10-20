@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.9"
+PLUGIN_VERSION = "1.8.10"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -1802,8 +1802,15 @@ def _object_attrs(value: Any) -> dict[str, Any]:
         return {}
 
 
+# Each merged-forward layer that NapCat inlines (messages → node → message →
+# segment → data → content) costs about six levels, so 64 covers ~10 layers of
+# 聊天记录套聊天记录. ``seen`` still guards against cycles.
+NESTED_SCAN_MAX_DEPTH = 64
+FORWARD_MAX_FETCHES = 50
+
+
 def _iter_nested(value: Any, depth: int = 0, seen: Optional[set[int]] = None) -> Iterator[Any]:
-    if depth > 8 or value is None:
+    if depth > NESTED_SCAN_MAX_DEPTH or value is None:
         return
     if seen is None:
         seen = set()
@@ -1868,7 +1875,7 @@ def _iter_nested_with_source(
 ) -> Iterator[tuple[Any, dict[str, Any]]]:
     """Yield nested values together with the nearest forward-node context."""
 
-    if depth > 8 or value is None:
+    if depth > NESTED_SCAN_MAX_DEPTH or value is None:
         return
     if seen is None:
         seen = set()
@@ -2036,6 +2043,9 @@ async def _fetch_forward_payloads(event: Any) -> list[Any]:
     for identifier in identifiers:
         if identifier in attempted:
             continue
+        if len(attempted) >= FORWARD_MAX_FETCHES:
+            _log("warning", "NameSearcher stopped expanding nested forwards after %s fetches", FORWARD_MAX_FETCHES)
+            break
         attempted.add(identifier)
         resolved = False
         for target in targets:
