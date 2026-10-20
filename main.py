@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.2"
+PLUGIN_VERSION = "1.11.3"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -6608,17 +6608,10 @@ class NameSearcherPlugin(Star):
             "truncated": 0,
         }
 
-    def _resource_chain(self, event: Any, matches: list[dict[str, Any]]) -> Any:
-        """Build a native message chain containing matched local resources."""
+    def _match_records(self, matches: list[dict[str, Any]]) -> list[tuple[dict[str, Any], Path]]:
+        """Unique (record, path) pairs of the matched source files that still exist."""
 
-        chain_result = getattr(event, "chain_result", None)
-        if not callable(chain_result):
-            return None
-        try:
-            import astrbot.api.message_components as Comp  # type: ignore
-        except Exception:
-            return None
-        components: list[Any] = []
+        found: list[tuple[dict[str, Any], Path]] = []
         seen: set[str] = set()
         for item in matches:
             source = item.get("source") if isinstance(item.get("source"), Mapping) else {}
@@ -6630,22 +6623,75 @@ class NameSearcherPlugin(Star):
             if not record or not path or not path.exists():
                 continue
             seen.add(artifact_id)
+            found.append((record, path))
+        return found
+
+    def _resource_chains(self, event: Any, matches: list[dict[str, Any]], include_files: bool = True) -> list[Any]:
+        """Native message chains for matched resources.
+
+        Text and images share one message; every non-image file is its own
+        message, because QQ cannot mix a file with text in one message.
+        """
+
+        chain_result = getattr(event, "chain_result", None)
+        if not callable(chain_result):
+            return []
+        try:
+            import astrbot.api.message_components as Comp  # type: ignore
+        except Exception:
+            return []
+        text_part: list[Any] = []
+        file_parts: list[Any] = []
+        for record, path in self._match_records(matches):
             name = str(record.get("name") or path.name)
-            components.append(Comp.Plain(f"来源文件资源：{name}\n"))
             try:
                 if record.get("kind") == "image":
-                    components.append(Comp.Image.fromFileSystem(str(path)))
-                else:
-                    components.append(Comp.File(file=str(path), name=name))
+                    text_part.append(Comp.Plain(f"来源文件资源：{name}\n"))
+                    text_part.append(Comp.Image.fromFileSystem(str(path)))
+                elif include_files:
+                    file_parts.append([Comp.File(file=str(path), name=name)])
             except Exception as exc:
                 _log("debug", "Unable to build resource component for %s: %s", name, exc)
-        if not components:
-            return None
-        try:
-            return chain_result(components)
-        except Exception as exc:
-            _log("debug", "Unable to build lookup resource chain: %s", exc)
-            return None
+        chains: list[Any] = []
+        for components in ([text_part] if text_part else []) + file_parts:
+            try:
+                chains.append(chain_result(components))
+            except Exception as exc:
+                _log("debug", "Unable to build lookup resource chain: %s", exc)
+        return chains
+
+    def _private_upload_ready(self, event: Any) -> bool:
+        bot = getattr(event, "bot", None)
+        return _event_chat_identity(event)[0] == "private" and callable(getattr(bot, "call_action", None))
+
+    async def _upload_private_files(self, event: Any, matches: list[dict[str, Any]]) -> list[str]:
+        """Send matched non-image files to a private chat via NapCat upload_private_file.
+
+        Files embedded in a private merged forward (or a plain private file
+        segment) arrive as 0 B on QQ, so private chats upload them directly.
+        Returns names that could not be uploaded.
+        """
+
+        files = [(record, path) for record, path in self._match_records(matches) if record.get("kind") != "image"]
+        if not files:
+            return []
+        bot = getattr(event, "bot", None)
+        call_action = getattr(bot, "call_action", None)
+        user_id = str(_event_sender_id(event) or "")
+        failed: list[str] = []
+        for record, path in files:
+            name = str(record.get("name") or path.name)
+            if not callable(call_action) or not user_id:
+                failed.append(name)
+                continue
+            try:
+                result = call_action(action="upload_private_file", user_id=int(user_id) if user_id.isdigit() else user_id, file=str(path), name=name)
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=120)
+            except Exception as exc:
+                _log("warning", "NameSearcher upload_private_file failed for %s: %s", name, exc)
+                failed.append(name)
+        return failed
 
     def _merged_forward_result(self, event: Any, query: str, matches: list[dict[str, Any]]) -> Any:
         """Build lookup results as one merged-forward message when supported."""
@@ -6663,6 +6709,7 @@ class NameSearcherPlugin(Star):
         if not all(callable(getattr(Comp, name, None)) for name in ("Node", "Nodes", "Plain")):
             return None
 
+        private = self._private_upload_ready(event)
         node_name = "姓名查找器"
         nodes = [Comp.Node(content=[Comp.Plain(f"查找对象：{query}\n匹配数量：{len(matches)}")], name=node_name, uin="0")]
         if not matches:
@@ -6674,15 +6721,20 @@ class NameSearcherPlugin(Star):
             artifact_id = str(source.get("id") or "")
             record = self.store.get(artifact_id) if artifact_id else None
             path = self.store.path_for(record) if record else None
+            file_node: Any = None
             if record and path and path.exists():
                 try:
                     if record.get("kind") == "image":
                         content.append(Comp.Image.fromFileSystem(str(path)))
+                    elif private:
+                        content.append(Comp.Plain(f"\n文件“{record.get('name') or path.name}”将单独发送"))
                     else:
-                        content.append(Comp.File(file=str(path), name=str(record.get("name") or path.name)))
+                        file_node = Comp.Node(content=[Comp.File(file=str(path), name=str(record.get("name") or path.name))], name=node_name, uin="0")
                 except Exception as exc:
                     _log("debug", "Unable to attach merged-forward resource %s: %s", artifact_id, exc)
             nodes.append(Comp.Node(content=content, name=node_name, uin="0"))
+            if file_node is not None:
+                nodes.append(file_node)
         try:
             return chain_result([Comp.Nodes(nodes)])
         except Exception as exc:
@@ -6778,15 +6830,18 @@ class NameSearcherPlugin(Star):
             yield _plain(event, _format_wildcard_result(self.people.wildcard_search(query)))
             return
         matches = self._lookup_matches(query)
-        if _as_bool(self.config.get("merged_forward_results", False)):
-            merged_result = self._merged_forward_result(event, query, matches)
-            if merged_result is not None:
-                yield merged_result
-                return
-        yield _plain(event, _format_result(query, matches, self.panel_base(), hidden_partial=self.people.last_hidden_partial))
-        resource_chain = self._resource_chain(event, matches)
-        if resource_chain is not None:
-            yield resource_chain
+        private = self._private_upload_ready(event)
+        merged_result = self._merged_forward_result(event, query, matches) if _as_bool(self.config.get("merged_forward_results", False)) else None
+        if merged_result is not None:
+            yield merged_result
+        else:
+            yield _plain(event, _format_result(query, matches, self.panel_base(), hidden_partial=self.people.last_hidden_partial))
+            for chain in self._resource_chains(event, matches, include_files=not private):
+                yield chain
+        if private:
+            failed = await self._upload_private_files(event, matches)
+            if failed:
+                yield _plain(event, "以下文件私聊发送失败，请到群里查询或用网页下载：" + "、".join(failed))
 
     @filter.command("图片转表格")
     async def image_table(self, event: AstrMessageEvent, artifact_id: str = ""):

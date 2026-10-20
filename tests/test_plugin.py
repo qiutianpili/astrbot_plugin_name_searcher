@@ -1394,6 +1394,64 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertIn("匹配数量：10", merged.nodes[0].content[0].text)
         self.assertIn("结果 10", merged.nodes[-1].content[0].text)
 
+    def test_merged_forward_splits_files_and_uploads_privately(self):
+        class Plain:
+            def __init__(self, text):
+                self.text = text
+
+        class Node:
+            def __init__(self, content, **kwargs):
+                self.content = content
+
+        class Nodes:
+            def __init__(self, nodes):
+                self.nodes = nodes
+
+        class File:
+            def __init__(self, name, file="", url=""):
+                self.name = name
+
+        class Image:
+            @classmethod
+            def fromFileSystem(cls, path):
+                return cls()
+
+        components = types.ModuleType("astrbot.api.message_components")
+        components.Plain, components.Node, components.Nodes, components.File, components.Image = Plain, Node, Nodes, File, Image
+        astrbot = types.ModuleType("astrbot"); api = types.ModuleType("astrbot.api")
+        astrbot.api = api; api.message_components = components
+        plugin = make_plugin(self.temp_path, merged_forward_results=True, vision_enabled=False, capture_progress_notify=False)
+        record = plugin.store.add_bytes("名单.xlsx", b"xlsx", kind="document", mime="application/octet-stream", source={})
+        matches = [{"record": {"姓名": "张三"}, "score": 1.0, "source": {"id": record["id"], "name": "名单.xlsx"}}]
+        plugin._lookup_matches = lambda _query: matches
+        modules = {"astrbot": astrbot, "astrbot.api": api, "astrbot.api.message_components": components}
+
+        group = FakeEvent([], text="/查找 张三", group_id="g1")
+        group.chain_result = lambda chain: chain
+        with patch.dict(sys.modules, modules):
+            output = asyncio.run(collect_async_generator(plugin.find(group)))
+        nodes = output[0][0].nodes
+        self.assertEqual(len(nodes), 3)
+        self.assertTrue(all(isinstance(part, Plain) for part in nodes[1].content))
+        self.assertEqual([type(part) for part in nodes[2].content], [File])
+
+        calls = []
+
+        class Bot:
+            async def call_action(self, action, **kwargs):
+                calls.append((action, kwargs))
+
+        private = FakeEvent([], text="/查找 张三", sender_id="42")
+        private.chain_result = lambda chain: chain
+        private.bot = Bot()
+        with patch.dict(sys.modules, modules):
+            output = asyncio.run(collect_async_generator(plugin.find(private)))
+        self.assertEqual(len(output), 1)
+        self.assertFalse(any(isinstance(part, File) for node in output[0][0].nodes for part in node.content))
+        self.assertEqual(calls[0][0], "upload_private_file")
+        self.assertEqual(calls[0][1]["user_id"], 42)
+        self.assertEqual(calls[0][1]["name"], "名单.xlsx")
+
     def test_merged_forward_results_fall_back_on_unsupported_platform(self):
         plugin = make_plugin(self.temp_path, merged_forward_results=True)
         event = FakeEvent([], text="/查找 张三")
