@@ -346,6 +346,9 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertIsNotNone(plugin.portal.session(session["token"]))
         plugin.config["portal_allowed_users"] = "7"
         self.assertIn("没有网页查询权限", plugin.portal_issue_code("ABCDEF", "private", "42", "42", "小明"))
+        for _ in range(main.PORTAL_FINDS_PER_MINUTE):
+            self.assertTrue(plugin.portal.allow("find:42", main.PORTAL_FINDS_PER_MINUTE, 60))
+        self.assertFalse(plugin.portal.allow("find:42", main.PORTAL_FINDS_PER_MINUTE, 60))
         self.assertEqual(plugin.portal.revoke_user("42"), 1)
         self.assertIsNone(plugin.portal.session(session["token"]))
 

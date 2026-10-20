@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.0"
+PLUGIN_VERSION = "1.11.1"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -4395,6 +4395,10 @@ PORTAL_MAX_VERIFY_ATTEMPTS = 5
 PORTAL_CHALLENGES_PER_IP = 12  # per 10 minutes
 PORTAL_CLAIMS_PER_USER = 6  # per 10 minutes
 PORTAL_RATE_WINDOW = 600
+PORTAL_MAX_OPEN_CHALLENGES = 500
+PORTAL_FINDS_PER_MINUTE = 20  # per session
+PORTAL_DOWNLOADS_PER_10_MIN = 60  # per session
+PORTAL_FIND_CONCURRENCY = 2
 
 
 def _portal_random(length: int, alphabet: str) -> str:
@@ -4428,9 +4432,13 @@ class PortalAuth:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._hits: dict[str, list[float]] = {}
 
-    def _rate_ok(self, key: str, limit: int) -> bool:
+    def allow(self, key: str, limit: int, window: float = PORTAL_RATE_WINDOW) -> bool:
+        with self._lock:
+            return self._rate_ok(key, limit, window)
+
+    def _rate_ok(self, key: str, limit: int, window: float = PORTAL_RATE_WINDOW) -> bool:
         now = self._clock()
-        hits = [stamp for stamp in self._hits.get(key, []) if now - stamp < PORTAL_RATE_WINDOW]
+        hits = [stamp for stamp in self._hits.get(key, []) if now - stamp < window]
         if len(hits) >= limit:
             self._hits[key] = hits
             return False
@@ -4457,6 +4465,8 @@ class PortalAuth:
         with self._lock:
             if not self._rate_ok(f"ip:{client}", PORTAL_CHALLENGES_PER_IP):
                 return {"ok": False, "error": "请求太频繁，请稍后再试", "status": 429}
+            if len(self._challenges) >= PORTAL_MAX_OPEN_CHALLENGES:
+                return {"ok": False, "error": "当前申请人数过多，请稍后再试", "status": 503}
             challenge_id = _portal_token()
             pair_code = _portal_random(6, PORTAL_PAIR_ALPHABET)
             while pair_code in self._pairs:
@@ -4603,6 +4613,7 @@ class PortalServer:
         self.plugin = plugin
         self.runner: Any = None
         self.bound: tuple[str, int] = ("", 0)
+        self._find_slots: Optional[asyncio.Semaphore] = None
 
     @property
     def running(self) -> bool:
@@ -4625,7 +4636,7 @@ class PortalServer:
         return {"Vary": "Origin"}
 
     def _client(self, request: Any) -> str:
-        forwarded = str(request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        forwarded = str(request.headers.get("X-Real-IP") or request.headers.get("CF-Connecting-IP") or "").split(",")[0].strip()
         return forwarded or str(request.remote or "")
 
     def _json(self, request: Any, payload: Mapping[str, Any], status: int = 200) -> Any:
@@ -4724,9 +4735,17 @@ class PortalServer:
         session, error = self._session_or_error(request)
         if error is not None:
             return error
+        user_key = str(session["user"].get("user_id") or "")
+        if not self.plugin.portal.allow(f"find:{user_key}", PORTAL_FINDS_PER_MINUTE, 60):
+            return self._json(request, {"ok": False, "error": "查询太频繁，请一分钟后再试", "status": 429})
         data = await self._payload(request)
         query = str(data.get("query") or "").strip()[:64]
-        result = _portal_strip_result(await asyncio.to_thread(self.plugin.find_objects, query))
+        if not query:
+            return self._json(request, {"ok": False, "error": "请输入要查找的姓名", "status": 400})
+        if self._find_slots is None:
+            self._find_slots = asyncio.Semaphore(PORTAL_FIND_CONCURRENCY)
+        async with self._find_slots:
+            result = _portal_strip_result(await asyncio.to_thread(self.plugin.find_objects, query))
         for group in result["names"]:
             for item in group["files"]:
                 session["files"].add(item["id"])
@@ -4740,6 +4759,8 @@ class PortalServer:
         if error is not None:
             return error
         artifact_id = str(request.match_info.get("artifact_id") or "")
+        if not self.plugin.portal.allow(f"dl:{session['user'].get('user_id')}", PORTAL_DOWNLOADS_PER_10_MIN, 600):
+            return self._json(request, {"ok": False, "error": "下载太频繁，请稍后再试", "status": 429})
         if artifact_id not in session["files"]:
             return self._json(request, {"ok": False, "error": "只能查看查询结果中的文件", "status": 403})
         record = self.plugin.store.get(artifact_id)
