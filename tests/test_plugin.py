@@ -507,6 +507,58 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(records[0]["source"]["sender_name"], "原发送者")
         self.assertEqual([item[0] for item in event.bot.calls], ["get_forward_msg", "get_group_file_url"])
 
+    def test_forward_file_falls_back_to_napcat_get_file(self):
+        local = self.temp_path / "napcat-cache.pdf"
+        local.write_bytes(b"%PDF-1.4 forwarded")
+
+        class Bot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, *, action, **kwargs):
+                self.calls.append(action)
+                if action == "get_forward_msg":
+                    return {"data": {"messages": [{"sender": {"user_id": 7}, "message": [{"type": "file", "data": {"file_id": "fid-9", "file": "手作风铃.pdf"}}]}]}}
+                if action == "get_private_file_url":
+                    raise RuntimeError("file not in this chat")
+                if action == "get_file":
+                    self.calls.append(kwargs.get("file_id"))
+                    return {"data": {"file": str(local), "url": str(local), "file_name": "手作风铃.pdf"}}
+                raise AssertionError(action)
+
+        event = FakeEvent([{"type": "forward", "data": {"id": "fw-2"}}])
+        event.bot = Bot()
+        plugin = make_plugin(self.temp_path, capture_progress_notify=False)
+        with patch.object(main, "_read_text_from_file", return_value=("", 0.0)):
+            records = asyncio.run(plugin.capture_event(event))
+        self.assertEqual(event.bot.calls, ["get_forward_msg", "get_private_file_url", "get_file", "fid-9"])
+        self.assertEqual(records[0]["download_status"], "ok")
+        self.assertEqual(records[0]["name"], "手作风铃.pdf")
+
+    def test_extensionless_download_is_typed_by_magic_bytes(self):
+        jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"x" * 40
+        self.assertEqual(main._sniff_content_type(jpeg), (".jpg", "image/jpeg"))
+        self.assertEqual(main._sniff_content_type(b"RIFF\x00\x00\x00\x00WEBPVP8 "), (".webp", "image/webp"))
+        self.assertIsNone(main._sniff_content_type(b"hello"))
+        self.assertEqual(main._fix_type_by_content("名单.pdf", "document", "application/pdf", b"%PDF-1.7"), ("名单.pdf", "document", "application/pdf"))
+        plugin = make_plugin(self.temp_path)
+        record = plugin.store.add_bytes("download", jpeg, kind="file", mime="application/octet-stream", source={})
+        self.assertEqual((record["name"], record["kind"], record["mime"], record["format"]), ("download.jpg", "image", "image/jpeg", "jpg"))
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = plugin.store.path_for(record)
+            self.assertEqual(main._prepare_vision_review_images(stored, "application/octet-stream", "", Path(tmp), 10), [stored])
+
+    def test_store_load_repairs_old_extensionless_records(self):
+        plugin = make_plugin(self.temp_path)
+        root = plugin.store.root
+        (root / "1-abc_download").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+        records = [{"id": "1-abc", "name": "download", "path": "1-abc_download", "kind": "image", "mime": "application/octet-stream", "format": "unknown", "download_status": "ok", "vision_status": "no_review_pages", "extraction_status": "no_text"}]
+        (root / "index.json").write_text(json.dumps(records), encoding="utf-8")
+        store = main.ArtifactStore(root)
+        fixed = store.get("1-abc")
+        self.assertEqual((fixed["name"], fixed["mime"], fixed["format"]), ("download.png", "image/png", "png"))
+        self.assertNotIn("vision_status", fixed)
+
     def test_clear_failed_only_removes_unavailable_records(self):
         plugin = make_plugin(self.temp_path)
         kept = plugin.store.add_bytes("kept.txt", b"ok", kind="document", mime="text/plain", source={})

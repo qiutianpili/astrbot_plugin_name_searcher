@@ -85,6 +85,11 @@ PATCH /config
 
 查找视觉模型输出时会兼容 Markdown 包裹、HTML 实体、零宽字符、全半角差异、姓名间标点和 `\\uXXXX` 转义文本。上述处理只生成搜索键，面板及索引中仍保留模型原始输出，便于核对。
 
+## 1.8.6 更新
+
+- 合并转发里的文件：get_group_file_url / get_private_file_url 拿不到链接时，改用 NapCat 的 get_file 按 file_id 下载（文件属于原聊天，前两个接口常失败）；成功/失败都会写入 AstrBot 日志。
+- 没有扩展名的下载（QQ 转发图片常叫 “download”）按文件头识别 JPG/PNG/GIF/WEBP/BMP/TIFF/HEIC/PDF，补上扩展名和 MIME，视觉模型不再跳过；已有的这类记录在插件启动时自动修正，可用“补跑模型识别”重新识别。
+
 ## 1.8.5 更新
 
 - 文件详情里，表格（xlsx/xls/xlsm/xlsb/ods/csv/tsv）、Word（docx/docm/dotx）、PDF、文本（txt/md/json/xml/log/ini/yaml）等无法内嵌预览的文件，在“下载文件”旁新增“在线预览”，用 https://20610728.xyz/hark/doc-viewer.html 查看，文件通过 postMessage 交给查看器、只在浏览器本地解析，不生成公开链接。

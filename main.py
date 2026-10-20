@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.8.5"
+PLUGIN_VERSION = "1.8.6"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -419,6 +419,76 @@ def _mime_for(path: Path, hint: str = "") -> str:
     return hint or MIME_OVERRIDES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 
+_MAGIC_TYPES: tuple[tuple[bytes, int, str, str], ...] = (
+    (b"\xff\xd8\xff", 0, ".jpg", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", 0, ".png", "image/png"),
+    (b"GIF87a", 0, ".gif", "image/gif"),
+    (b"GIF89a", 0, ".gif", "image/gif"),
+    (b"BM", 0, ".bmp", "image/bmp"),
+    (b"II*\x00", 0, ".tif", "image/tiff"),
+    (b"MM\x00*", 0, ".tif", "image/tiff"),
+    (b"%PDF-", 0, ".pdf", "application/pdf"),
+)
+_GENERIC_MIMES = {"", "application/octet-stream", "binary/octet-stream", "application/unknown"}
+
+
+def _sniff_content_type(head: bytes) -> Optional[tuple[str, str]]:
+    """Return (extension, mime) for common image/PDF payloads by magic bytes."""
+
+    head = bytes(head or b"")[:32]
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    if head[4:12] in {b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypavif"}:
+        return (".avif", "image/avif") if head[8:12] == b"avif" else (".heic", "image/heic")
+    for magic, offset, ext, mime in _MAGIC_TYPES:
+        if head[offset:offset + len(magic)] == magic:
+            return ext, mime
+    return None
+
+
+def _fix_type_by_content(name: str, kind: str, mime: str, head: bytes) -> tuple[str, str, str]:
+    """Give extension-less downloads (QQ forward images are often named
+    "download") a real extension, MIME and kind from their magic bytes."""
+
+    sniffed = _sniff_content_type(head)
+    if not sniffed:
+        return name, kind, mime
+    ext, sniffed_mime = sniffed
+    suffix = Path(name or "").suffix.lower()
+    known = suffix in IMAGE_EXTENSIONS or suffix in MIME_OVERRIDES or bool(mimetypes.guess_type(f"x{suffix}")[0]) if suffix else False
+    if not known:
+        name = f"{name or 'file'}{ext}"
+    if str(mime or "").strip().lower() in _GENERIC_MIMES or (sniffed_mime.startswith("image/") and not str(mime).lower().startswith("image/") and not known):
+        mime = sniffed_mime
+    if kind in {"", "file"} or (sniffed_mime.startswith("image/") and kind != "image" and not known):
+        kind = _kind_for(name, mime)
+    return name, kind, mime
+
+
+def _repair_record_type(record: dict[str, Any], root: Path) -> bool:
+    """Fix stored records saved before content sniffing; True if changed."""
+
+    if record.get("format") not in {None, "", "unknown"} or record.get("download_status") != "ok":
+        return False
+    stored = str(record.get("path") or "")
+    if not stored:
+        return False
+    try:
+        with (root / stored).open("rb") as handle:
+            head = handle.read(32)
+    except OSError:
+        return False
+    name, kind, mime = _fix_type_by_content(str(record.get("name") or ""), str(record.get("kind") or ""), str(record.get("mime") or ""), head)
+    if name == record.get("name"):
+        return False
+    record.update({"name": name, "kind": kind, "mime": mime, "format": Path(name).suffix.lower().lstrip(".") or "unknown"})
+    # Vision skipped these because they did not look like images; let the
+    # next capture or 补跑模型识别 review them again.
+    if record.get("vision_status") == "no_review_pages":
+        record.pop("vision_status", None)
+    return True
+
+
 def _kind_for(name: str, mime: str = "", type_hint: str = "") -> str:
     text = f"{name} {mime} {type_hint}".lower()
     suffix = Path(name).suffix.lower()
@@ -497,6 +567,10 @@ class ArtifactStore:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             self._records = []
         repaired = sum(1 for item in self._records if _repair_record_names(item))
+        retyped = sum(1 for item in self._records if _repair_record_type(item, self.root))
+        if retyped:
+            _log("info", "NameSearcher detected file types for %s extension-less files", retyped)
+        repaired += retyped
         if repaired:
             try:
                 self._save()
@@ -542,6 +616,7 @@ class ArtifactStore:
         download_status: str = "ok",
         reason: str = "",
     ) -> dict[str, Any]:
+        name, kind, mime = _fix_type_by_content(name, kind, mime, content[:32])
         digest = hashlib.sha256(content).hexdigest()
         with self._lock:
             for existing in self._records:
@@ -2053,22 +2128,37 @@ async def _resolve_qq_file_urls(event: Any, roots: Iterable[Any]) -> None:
                 actions.append(("get_group_file_url", {"file_id": file_id, "group_id": chat_id}))
             else:
                 actions.append(("get_private_file_url", {"file_id": file_id}))
+            # A file inside a merged forward belongs to the original chat, so
+            # the URL actions above often fail. NapCat's get_file decodes the
+            # file_id itself and downloads the file next to QQ, returning a
+            # local path that _read_candidate can read (same host as AstrBot).
+            actions.append(("get_file", {"file_id": file_id}))
+            resolved = False
             for action, kwargs in actions:
                 try:
                     result = call_action(action=action, **kwargs, **routing)
                     if inspect.isawaitable(result):
                         result = await result
                 except Exception as exc:
-                    _log("debug", "Unable to resolve QQ forwarded file %s: %s", file_id, exc)
+                    _log("info", "NameSearcher %s failed for forwarded file %s: %s", action, file_id, exc)
                     continue
                 result_data = result.get("data") if isinstance(result, Mapping) and isinstance(result.get("data"), Mapping) else result
                 if not isinstance(result_data, Mapping):
                     continue
                 url = result_data.get("url") or result_data.get("file_url") or result_data.get("download_url")
+                if not url and action == "get_file":
+                    if result_data.get("base64"):
+                        url = f"data:application/octet-stream;base64,{result_data.get('base64')}"
+                    elif result_data.get("file"):
+                        url = result_data.get("file")
                 if url:
                     data["url"] = url
                     data.setdefault("name", result_data.get("file_name") or result_data.get("name") or data.get("file") or file_id)
+                    resolved = True
+                    _log("info", "NameSearcher resolved forwarded file %s via %s", data.get("name") or file_id, action)
                     break
+            if not resolved:
+                _log("warning", "NameSearcher could not resolve forwarded file %s (%s)", data.get("name") or data.get("file") or file_id, file_id)
 
 
 def _read_candidate(candidate: AttachmentCandidate, timeout: int, max_bytes: int) -> tuple[Optional[bytes], str]:
@@ -2972,6 +3062,15 @@ def _prepare_vision_review_images(
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS or mime.startswith("image/"):
         return [path]
+    try:
+        with path.open("rb") as handle:
+            sniffed = _sniff_content_type(handle.read(32))
+    except OSError:
+        sniffed = None
+    if sniffed and sniffed[1].startswith("image/"):
+        return [path]
+    if sniffed and sniffed[0] == ".pdf":
+        suffix = ".pdf"
     max_pages = _vision_page_limit(max_pages)
     if suffix == ".pdf":
         try:
