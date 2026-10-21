@@ -227,7 +227,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "portal_allowed_users": "",
     "portal_allow_private": True,
     "portal_session_minutes": 30,
-    "portal_session_max_finds": 0,
+    "portal_session_max_finds": 2,
 }
 
 # Keys that only the AstrBot plugin config (admin) may change.  The plugin

@@ -691,7 +691,7 @@
         els.visionFileScope.value = c.vision_file_scope === 'all' ? 'all' : 'image_pdf';
         els.importModelReview.checked = isOn(c.import_model_review, true);
         const $ = id => document.getElementById(id);
-        $('portalEnabled').checked = isOn(c.portal_enabled, false); $('portalSessionMinutes').value = c.portal_session_minutes ?? 30; $('portalSessionMaxFinds').value = c.portal_session_max_finds ?? 0;
+        $('portalEnabled').checked = isOn(c.portal_enabled, false); $('portalSessionMinutes').value = c.portal_session_minutes ?? 30; $('portalSessionMaxFinds').value = c.portal_session_max_finds ?? 2;
         $('portalAllowedGroups').value = c.portal_allowed_groups ?? ''; $('portalAllowedUsers').value = c.portal_allowed_users ?? '';
         $('portalAllowPrivate').checked = isOn(c.portal_allow_private, true); $('portalPublicUrl').value = c.portal_public_url ?? ''; $('portalAllowedOrigins').value = c.portal_allowed_origins ?? '';
         loadPortalStatus();

@@ -361,7 +361,7 @@ class NameSearcherPluginTests(unittest.TestCase):
         import socket
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
-                             portal_enabled=True, portal_port=port, portal_allowed_origins="https://example.org")
+                             portal_enabled=True, portal_port=port, portal_allowed_origins="https://example.org", portal_session_max_finds=0)
         record = plugin.store.add_bytes("名单.txt", "张三".encode("utf-8"), kind="document", mime="text/plain", source={})
         plugin.store.update(record["id"], download_status="ok", ocr_text="1 张三 计网")
         other = plugin.store.add_bytes("其他.txt", b"secret", kind="document", mime="text/plain", source={})
