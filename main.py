@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.3"
+PLUGIN_VERSION = "1.11.4"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -227,6 +227,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "portal_allowed_users": "",
     "portal_allow_private": True,
     "portal_session_minutes": 30,
+    "portal_session_max_finds": 0,
 }
 
 # Keys that only the AstrBot plugin config (admin) may change.  The plugin
@@ -4547,6 +4548,7 @@ class PortalAuth:
                 "created": now,
                 "expires": now + ttl,
                 "files": set(),
+                "finds": 0,
             }
             return {"ok": True, "token": token, "expires_in": int(ttl), "user": _portal_public_user(item["user"])}
 
@@ -4571,9 +4573,13 @@ class PortalAuth:
         now = self._clock()
         with self._lock:
             return [
-                {**_portal_public_user(session["user"]), "expires_in": int(session["expires"] - now)}
+                {**_portal_public_user(session["user"]), "expires_in": int(session["expires"] - now), "finds": int(session.get("finds") or 0)}
                 for session in self._sessions.values()
             ]
+
+
+def _portal_audit_id(line: str) -> str:
+    return hashlib.sha1(str(line).strip().encode("utf-8")).hexdigest()[:16]
 
 
 def _portal_public_user(user: Mapping[str, Any]) -> dict[str, Any]:
@@ -4743,7 +4749,11 @@ class PortalServer:
         session, error = self._session_or_error(request)
         if error is not None:
             return error
-        return self._json(request, {"ok": True, "user": _portal_public_user(session["user"]), "expires_in": int(session["expires"] - time.time())})
+        info = {"ok": True, "user": _portal_public_user(session["user"]), "expires_in": int(session["expires"] - time.time())}
+        max_finds = self.plugin._portal_session_max_finds()
+        if max_finds:
+            info["finds_left"] = max(0, max_finds - int(session.get("finds") or 0))
+        return self._json(request, info)
 
     async def logout(self, request: Any) -> Any:
         self.plugin.portal.revoke(self._token(request))
@@ -4754,12 +4764,16 @@ class PortalServer:
         if error is not None:
             return error
         user_key = str(session["user"].get("user_id") or "")
+        max_finds = self.plugin._portal_session_max_finds()
+        if max_finds and int(session.get("finds") or 0) >= max_finds:
+            return self._json(request, {"ok": False, "error": f"本次登录最多可查询 {max_finds} 次，已用完，请重新获取验证码登录", "status": 429, "finds_left": 0})
         if not self.plugin.portal.allow(f"find:{user_key}", PORTAL_FINDS_PER_MINUTE, 60):
             return self._json(request, {"ok": False, "error": "查询太频繁，请一分钟后再试", "status": 429})
         data = await self._payload(request)
         query = str(data.get("query") or "").strip()[:64]
         if not query:
             return self._json(request, {"ok": False, "error": "请输入要查找的姓名", "status": 400})
+        session["finds"] = int(session.get("finds") or 0) + 1
         if self._find_slots is None:
             self._find_slots = asyncio.Semaphore(PORTAL_FIND_CONCURRENCY)
         async with self._find_slots:
@@ -4768,6 +4782,8 @@ class PortalServer:
             for item in group["files"]:
                 session["files"].add(item["id"])
         self.plugin._portal_audit("find", session["user"], query=query, client=self._client(request), names=result["name_count"])
+        if max_finds:
+            result["finds_left"] = max(0, max_finds - int(session["finds"]))
         return self._json(request, result)
 
     async def content(self, request: Any) -> Any:
@@ -5089,6 +5105,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/portal", self._page_portal_status, ["GET"], "Web query portal status, users and audit log"),
             (f"/{PLUGIN_ID}/portal/revoke", self._page_portal_revoke, ["POST"], "Revoke a user's web query sessions"),
             (f"/{PLUGIN_ID}/portal/unban", self._page_portal_unban, ["POST"], "Lift a web query IP ban"),
+            (f"/{PLUGIN_ID}/portal/audit/delete", self._page_portal_audit_delete, ["POST"], "Delete web query audit records"),
             (f"/{PLUGIN_ID}/config", self._page_config, ["GET"], "Read plugin config"),
             (f"/{PLUGIN_ID}/config", self._page_save_config, ["POST"], "Save plugin config"),
         )
@@ -5255,6 +5272,10 @@ class NameSearcherPlugin(Star):
     async def _page_portal_unban(self) -> Any:
         payload = await _page_request_payload()
         return _page_json_response({"unbanned": self.portal_unban(str(payload.get("ip") or ""))})
+
+    async def _page_portal_audit_delete(self) -> Any:
+        payload = await _page_request_payload()
+        return _page_json_response({"deleted": self.portal_delete_audit(payload.get("ids") or payload.get("id"), _as_bool(payload.get("all", False)))})
 
     async def _page_find(self) -> Any:
         payload = await _page_request_payload()
@@ -6403,6 +6424,14 @@ class NameSearcherPlugin(Star):
         except (TypeError, ValueError):
             return 30.0
 
+    def _portal_session_max_finds(self) -> int:
+        """Finds allowed per web login; 0 means unlimited."""
+
+        try:
+            return min(10000, max(0, int(float(self.config.get("portal_session_max_finds") or 0))))
+        except (TypeError, ValueError):
+            return 0
+
     def _portal_dir(self) -> Path:
         path = self.store.root.parent / "portal"
         path.mkdir(parents=True, exist_ok=True)
@@ -6486,15 +6515,38 @@ class NameSearcherPlugin(Star):
             self._portal_save_bans()
         return True
 
+    def portal_delete_audit(self, ids: Any = None, clear_all: bool = False) -> int:
+        """Delete web query audit lines by id (hash of the line) or all of them."""
+
+        wanted = {str(item) for item in (ids if isinstance(ids, (list, tuple, set)) else [ids]) if item}
+        if not wanted and not clear_all:
+            return 0
+        path = self._portal_dir() / "audit.jsonl"
+        with self._portal_lock:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return 0
+            kept = [] if clear_all else [line for line in lines if _portal_audit_id(line) not in wanted]
+            removed = len(lines) - len(kept)
+            if removed:
+                temp = path.with_suffix(".tmp")
+                temp.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+                temp.replace(path)
+        return removed
+
     def portal_status(self, audit_limit: int = 50) -> dict[str, Any]:
         audit: list[dict[str, Any]] = []
         try:
             lines = (self._portal_dir() / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-audit_limit:]
             for line in reversed(lines):
                 try:
-                    audit.append(json.loads(line))
+                    entry = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(entry, dict):
+                    entry["id"] = _portal_audit_id(line)
+                    audit.append(entry)
         except OSError:
             pass
         profiles = sorted(self._portal_profiles().values(), key=lambda item: str(item.get("last_seen") or ""), reverse=True)
@@ -6505,6 +6557,7 @@ class NameSearcherPlugin(Star):
             "error": self._portal_error,
             "public_url": str(self.config.get("portal_public_url") or ""),
             "session_minutes": self._portal_session_minutes(),
+            "session_max_finds": self._portal_session_max_finds(),
             "sessions": self.portal.active_sessions(),
             "users": profiles[:100],
             "audit": audit,

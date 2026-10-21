@@ -115,6 +115,9 @@
     .portal-table th, .portal-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--stroke-2); color: var(--text-primary); overflow-wrap: anywhere; }
     .portal-table th { color: var(--text-secondary); font-weight: 500; }
     .portal-sub { font: 600 13px/1.4 var(--sans); color: var(--text-primary); margin-top: 6px; }
+    .portal-audit-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .portal-more summary { cursor: pointer; padding: 8px; font-size: 12px; color: var(--text-secondary); }
+    .portal-table td:last-child { white-space: nowrap; }
     .workbench { border-radius: var(--r-l); background: var(--fill-card); border: 1px solid var(--stroke-2); box-shadow: var(--soft); overflow: hidden; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--stroke-2); }
     .search { position: relative; flex: 1 1 260px; min-width: 200px; }
@@ -250,7 +253,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.3</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.4</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -318,6 +321,7 @@
         <div class="config-grid">
           <div class="field"><label for="portalEnabled">网页查询</label><label class="toggle-row">开放网站临时查询和下载<input id="portalEnabled" type="checkbox"></label><small class="field-hint">查询页显示识别码，用户发“/验证码 识别码”给机器人换取验证码，验证码只对该页面有效。</small></div>
           <div class="field"><label for="portalSessionMinutes">临时查询时限（分钟）</label><input id="portalSessionMinutes" type="number" min="1" max="1440" step="1" placeholder="30"></div>
+          <div class="field"><label for="portalSessionMaxFinds">单次登录可查询次数（0 不限）</label><input id="portalSessionMaxFinds" type="number" min="0" max="10000" step="1" placeholder="0"></div>
           <div class="field"><label for="portalAllowedGroups">可申请的群聊 ID</label><textarea id="portalAllowedGroups" placeholder="多个用逗号分隔；留空表示所有群"></textarea></div>
           <div class="field"><label for="portalAllowedUsers">可申请的用户 ID</label><textarea id="portalAllowedUsers" placeholder="多个用逗号分隔；留空表示所有人"></textarea></div>
           <div class="field"><label for="portalAllowPrivate">私聊申请</label><label class="toggle-row">允许私聊机器人申请验证码<input id="portalAllowPrivate" type="checkbox"></label></div>
@@ -687,11 +691,12 @@
         els.visionFileScope.value = c.vision_file_scope === 'all' ? 'all' : 'image_pdf';
         els.importModelReview.checked = isOn(c.import_model_review, true);
         const $ = id => document.getElementById(id);
-        $('portalEnabled').checked = isOn(c.portal_enabled, false); $('portalSessionMinutes').value = c.portal_session_minutes ?? 30;
+        $('portalEnabled').checked = isOn(c.portal_enabled, false); $('portalSessionMinutes').value = c.portal_session_minutes ?? 30; $('portalSessionMaxFinds').value = c.portal_session_max_finds ?? 0;
         $('portalAllowedGroups').value = c.portal_allowed_groups ?? ''; $('portalAllowedUsers').value = c.portal_allowed_users ?? '';
         $('portalAllowPrivate').checked = isOn(c.portal_allow_private, true); $('portalPublicUrl').value = c.portal_public_url ?? ''; $('portalAllowedOrigins').value = c.portal_allowed_origins ?? '';
         loadPortalStatus();
       }
+      let portalAuditOpen = false; let portalAuditClearArmed = false; let portalAuditClearTimer = 0;
       async function loadPortalStatus() {
         const box = document.getElementById('portalStatus');
         let st; try { st = await request('/portal'); } catch (_) { box.innerHTML = ''; return; }
@@ -700,12 +705,24 @@
         const sessions = Array.isArray(st.sessions) ? st.sessions : []; const users = Array.isArray(st.users) ? st.users : []; const audit = Array.isArray(st.audit) ? st.audit : []; const bans = Array.isArray(st.bans) ? st.bans : [];
         const who = item => `${escape(text(item.nickname, ''))} ${escape(text(item.user_id, ''))}`.trim();
         const act = {code: '申请验证码', login: '登录', find: '查询', download: '下载', ban: '封禁 IP'};
+        const auditRow = item => `<tr><td>${escape(text(item.time, '').replace('T', ' ').slice(5, 16))}</td><td>${who(item)}</td><td>${act[item.action] || escape(item.action)}</td><td>${escape(text(item.query || item.file || item.pair_code, ''))}</td><td>${item.id ? `<button class="button" type="button" data-portal-audit-del="${escape(item.id)}">删除</button>` : ''}</td></tr>`;
         box.innerHTML = `<div class="portal-line">服务：${state_}${st.error ? ` · <span style="color:var(--danger,#d33)">${escape(st.error)}</span>` : ''} · 当前在线 ${sessions.length} 人</div>`
           + (sessions.length ? `<div class="portal-sub">在线会话</div><table class="portal-table"><tr><th>用户</th><th>来源</th><th>剩余</th><th></th></tr>${sessions.map(item => `<tr><td>${who(item)}</td><td>${item.group_id ? `群 ${escape(item.group_id)}` : '私聊'}</td><td>${Math.ceil((Number(item.expires_in) || 0) / 60)} 分钟</td><td><button class="button" type="button" data-portal-revoke="${escape(item.user_id)}">踢下线</button></td></tr>`).join('')}</table>` : '')
           + (users.length ? `<div class="portal-sub">用户画像（最近 ${Math.min(users.length, 20)} 人）</div><table class="portal-table"><tr><th>用户</th><th>群</th><th>申请/登录/查询/下载</th><th>最近</th></tr>${users.slice(0, 20).map(item => `<tr><td>${who(item)}</td><td>${escape((item.groups || []).join('、') || '私聊')}</td><td>${Number(item.codes) || 0} / ${Number(item.logins) || 0} / ${Number(item.finds) || 0} / ${Number(item.downloads) || 0}</td><td>${escape(text(item.last_seen, '').replace('T', ' ').slice(0, 16))}</td></tr>`).join('')}</table>` : '')
           + (bans.length ? `<div class="portal-sub">已封禁 IP（${bans.length}）</div><table class="portal-table"><tr><th>IP</th><th>原因</th><th>时间</th><th></th></tr>${bans.slice(0, 50).map(item => `<tr><td>${escape(item.ip)}</td><td>${escape(text(item.reason, ''))}</td><td>${escape(text(item.since, '').replace('T', ' ').slice(5, 16))}</td><td><button class="button" type="button" data-portal-unban="${escape(item.ip)}">解封</button></td></tr>`).join('')}</table>` : '')
-          + (audit.length ? `<div class="portal-sub">最近记录</div><table class="portal-table"><tr><th>时间</th><th>用户</th><th>操作</th><th>内容</th></tr>${audit.slice(0, 30).map(item => `<tr><td>${escape(text(item.time, '').replace('T', ' ').slice(5, 16))}</td><td>${who(item)}</td><td>${act[item.action] || escape(item.action)}</td><td>${escape(text(item.query || item.file || item.pair_code, ''))}</td></tr>`).join('')}</table>` : '');
+          + (audit.length ? `<div class="portal-sub portal-audit-head">最近记录（${audit.length}）<button class="button" type="button" data-portal-audit-clear>${portalAuditClearArmed ? '再点一次确认清空' : '清空'}</button></div><table class="portal-table"><tr><th>时间</th><th>用户</th><th>操作</th><th>内容</th><th></th></tr>${audit.slice(0, 3).map(auditRow).join('')}</table>${audit.length > 3 ? `<details class="portal-more" data-portal-audit-more${portalAuditOpen ? ' open' : ''}><summary>展开其余 ${audit.length - 3} 条</summary><table class="portal-table">${audit.slice(3).map(auditRow).join('')}</table></details>` : ''}` : '');
       }
+      document.getElementById('portalStatus').addEventListener('toggle', event => { if (event.target.matches && event.target.matches('[data-portal-audit-more]')) portalAuditOpen = event.target.open; }, true);
+      document.getElementById('portalStatus').addEventListener('click', async event => {
+        const del = event.target.closest('[data-portal-audit-del]');
+        if (del) { try { await request('/portal/audit/delete', {method: 'POST', body: JSON.stringify({ids: [del.dataset.portalAuditDel]})}); toast('已删除'); loadPortalStatus(); } catch (error) { showError(`操作失败：${error.message}`); } return; }
+        const clear = event.target.closest('[data-portal-audit-clear]');
+        if (clear) {
+          if (!portalAuditClearArmed) { portalAuditClearArmed = true; clear.textContent = '再点一次确认清空'; clearTimeout(portalAuditClearTimer); portalAuditClearTimer = setTimeout(() => { portalAuditClearArmed = false; clear.textContent = '清空'; }, 4000); return; }
+          portalAuditClearArmed = false; clearTimeout(portalAuditClearTimer);
+          try { await request('/portal/audit/delete', {method: 'POST', body: JSON.stringify({all: true})}); toast('已清空'); loadPortalStatus(); } catch (error) { showError(`操作失败：${error.message}`); } return;
+        }
+      });
       document.getElementById('portalStatus').addEventListener('click', async event => { const unban = event.target.closest('[data-portal-unban]'); if (unban) { try { await request('/portal/unban', {method: 'POST', body: JSON.stringify({ip: unban.dataset.portalUnban})}); toast('已解封'); loadPortalStatus(); } catch (error) { showError(`操作失败：${error.message}`); } return; } const button = event.target.closest('[data-portal-revoke]'); if (!button) return; try { await request('/portal/revoke', {method: 'POST', body: JSON.stringify({user_id: button.dataset.portalRevoke})}); toast('已踢下线'); loadPortalStatus(); } catch (error) { showError(`操作失败：${error.message}`); } });
       async function saveConfig() {
         const interval = Math.max(0, Math.floor(Number(els.captureIntervalSeconds.value) || 0));
@@ -721,7 +738,7 @@
           notify_archive_limits: els.notifyArchiveLimits.checked,
           archive_extraction_enabled: els.archiveExtractionEnabled.checked, archive_max_depth: Math.max(0, Math.min(8, Number(els.archiveMaxDepth.value) || 0)),
           archive_max_members: Math.max(1, Math.min(5000, Number(els.archiveMaxMembers.value) || 300)), archive_max_total_size_mb: Math.max(1, Number(els.archiveMaxTotalSizeMb.value) || 200),
-          portal_enabled: document.getElementById('portalEnabled').checked, portal_session_minutes: Math.max(1, Math.min(1440, Math.floor(Number(document.getElementById('portalSessionMinutes').value) || 30))),
+          portal_enabled: document.getElementById('portalEnabled').checked, portal_session_minutes: Math.max(1, Math.min(1440, Math.floor(Number(document.getElementById('portalSessionMinutes').value) || 30))), portal_session_max_finds: Math.max(0, Math.min(10000, Math.floor(Number(document.getElementById('portalSessionMaxFinds').value) || 0))),
           portal_allowed_groups: document.getElementById('portalAllowedGroups').value.trim(), portal_allowed_users: document.getElementById('portalAllowedUsers').value.trim(),
           portal_allow_private: document.getElementById('portalAllowPrivate').checked, portal_public_url: document.getElementById('portalPublicUrl').value.trim(), portal_allowed_origins: document.getElementById('portalAllowedOrigins').value.trim()
         };

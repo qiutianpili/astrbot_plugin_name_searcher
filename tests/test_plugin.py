@@ -389,6 +389,14 @@ class NameSearcherPluginTests(unittest.TestCase):
                         found = await resp.json()
                     self.assertEqual(found["names"][0]["name"], "张三")
                     self.assertNotIn("library", found["names"][0])
+                    self.assertNotIn("finds_left", found)
+                    plugin.config["portal_session_max_finds"] = 2
+                    async with http.post(base + "/find", json={"query": "张三"}, headers=auth) as resp:
+                        self.assertEqual((await resp.json())["finds_left"], 0)
+                    async with http.post(base + "/find", json={"query": "张三"}, headers=auth) as resp:
+                        self.assertEqual(resp.status, 429)
+                        self.assertIn("已用完", (await resp.json())["error"])
+                    plugin.config["portal_session_max_finds"] = 0
                     async with http.get(f"{base}/files/{record['id']}/content", params={"token": token}) as resp:
                         self.assertEqual(resp.status, 200)
                         self.assertEqual((await resp.read()).decode("utf-8"), "张三")
@@ -412,8 +420,12 @@ class NameSearcherPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
         status = plugin.portal_status()
-        self.assertEqual([item["action"] for item in status["audit"]][:4], ["ban", "download", "find", "login"])
+        self.assertEqual([item["action"] for item in status["audit"]][:5], ["ban", "download", "find", "find", "login"])
         self.assertEqual(status["users"][0]["downloads"], 1)
+        self.assertEqual(plugin.portal_delete_audit([status["audit"][0]["id"]]), 1)
+        self.assertEqual(plugin.portal_status()["audit"][0]["action"], "download")
+        self.assertGreater(plugin.portal_delete_audit(clear_all=True), 0)
+        self.assertEqual(plugin.portal_status()["audit"], [])
 
     def test_pending_panel_upload_resumes_after_plugin_restart(self):
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)

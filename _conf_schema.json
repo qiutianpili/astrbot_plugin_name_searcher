@@ -358,6 +358,12 @@
     "default": 30,
     "hint": "验证通过后可查询和下载的时长，1~1440。"
   },
+  "portal_session_max_finds": {
+    "description": "单次登录可查询次数",
+    "type": "int",
+    "default": 0,
+    "hint": "每次网页临时登录最多可查询的次数，0 表示不限。用完后需重新获取验证码。"
+  },
   "portal_allowed_groups": {
     "description": "可申请验证码的群聊 ID",
     "type": "text",
