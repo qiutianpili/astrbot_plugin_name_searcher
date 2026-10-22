@@ -253,7 +253,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.4</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.5</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -287,7 +287,7 @@
     <section class="workbench" aria-label="文件管理">
       <div class="toolbar">
         <div class="search"><span class="search-mark" aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="按文件名、来源或类型筛选" autocomplete="off"></div>
-        <select id="typeFilter" class="filter-select" aria-label="按类型筛选"><option value="all">全部类型</option><option value="图片">图片</option><option value="文档">文档</option><option value="表格">表格</option><option value="演示文稿">演示文稿</option><option value="压缩文件">压缩文件</option><option value="其他">其他</option></select><select id="sourceFilter" class="filter-select" aria-label="按来源筛选"><option value="all">全部来源</option><option value="chat">聊天捕获</option><option value="upload">插件页上传</option><option value="local">本地识别导入</option><option value="latest">最近一次捕获</option></select><select id="statusFilter" class="filter-select" aria-label="按状态筛选"><option value="all">全部状态</option><option value="recognized">已识别</option><option value="pending">待识别 / 识别中</option><option value="failed">下载或识别失败</option></select>
+        <select id="typeFilter" class="filter-select" aria-label="按类型筛选"><option value="all">全部类型</option><option value="图片">图片</option><option value="文档">文档</option><option value="表格">表格</option><option value="演示文稿">演示文稿</option><option value="压缩文件">压缩文件</option><option value="其他">其他</option></select><select id="sortSelect" class="filter-select" aria-label="排序"><option value="">默认顺序</option><option value="time-desc">上传时间：最新在前</option><option value="time-asc">上传时间：最早在前</option><option value="asc">文件名：升序</option><option value="desc">文件名：降序</option></select><select id="sourceFilter" class="filter-select" aria-label="按来源筛选"><option value="all">全部来源</option><option value="chat">聊天捕获</option><option value="upload">插件页上传</option><option value="local">本地识别导入</option><option value="latest">最近一次捕获</option></select><select id="statusFilter" class="filter-select" aria-label="按状态筛选"><option value="all">全部状态</option><option value="recognized">已识别</option><option value="pending">待识别 / 识别中</option><option value="failed">下载或识别失败</option></select>
         <button id="refreshButton" class="button" type="button" title="重新读取文件列表">刷新</button>
         <input id="uploadInput" class="visually-hidden" type="file" multiple>
         <button id="uploadButton" class="button primary" type="button" title="从本机批量上传图片、文档或压缩包，由服务器识别">批量上传</button>
@@ -300,7 +300,7 @@
         <span id="toolbarNote" class="toolbar-note">-</span>
       </div>
       <div id="errorBox" class="error" hidden></div>
-      <div class="list-head"><span></span><button id="nameSortButton" class="sort-button" type="button" data-sort="" title="按文件名排序" aria-label="按文件名排序，当前默认顺序">文件 <span class="sort-arrow" aria-hidden="true">↕</span></button><span>类型</span><span>大小</span><span>来源 / 捕获时间</span><span></span></div>
+      <div class="list-head"><span></span><button id="nameSortButton" class="sort-button" type="button" data-sort="" title="按文件名排序" aria-label="按文件名排序，当前默认顺序">文件 <span class="sort-arrow" aria-hidden="true">↕</span></button><span>类型</span><span>大小</span><button id="timeSortButton" class="sort-button" type="button" data-sort="" title="按上传时间排序" aria-label="按上传时间排序，当前默认顺序">来源 / 上传时间 <span class="sort-arrow" aria-hidden="true">↕</span></button><span></span></div>
       <div id="fileList" class="file-list"><div class="loading">正在读取文件…</div></div>
     </section>
 
@@ -399,7 +399,7 @@
       const bridge = window.AstrBotPluginPage || null;
       const useBridge = !!(bridge && typeof bridge.ready === 'function' && typeof bridge.apiGet === 'function' && typeof bridge.apiPost === 'function');
       const bridgeReady = useBridge ? bridge.ready() : Promise.resolve(null);
-      const state = { files: [], filtered: [], selected: new Set(), config: {}, expanded: false, latest: new Set(), sort: (() => { try { const v = localStorage.getItem('ns-name-sort'); return v === 'asc' || v === 'desc' ? v : ''; } catch (_) { return ''; } })() };
+      const state = { files: [], filtered: [], selected: new Set(), config: {}, expanded: false, latest: new Set(), sort: (() => { try { const v = localStorage.getItem('ns-name-sort'); return ['asc', 'desc', 'time-desc', 'time-asc'].includes(v) ? v : ''; } catch (_) { return ''; } })() };
       const nameCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
       const COLLAPSE_AT = 5;
       const isLocal = file => (file.source || {}).upload_source === 'local-tool';
@@ -428,7 +428,9 @@
       const fileName = file => text(file.name || file.filename || file.original_name || fileId(file), '未命名文件');
       const fileUrl = file => file.download_status === 'unavailable' ? '' : text(file.preview_data_url || file.preview_url || file.url || file.download_url || file.content_url || (!bridge && file.id ? withToken(endpoint(activeApi, `/files/${encodeURIComponent(file.id)}`)) : ''), '');
       const formatSize = bytes => { const n = Number(bytes); if (!Number.isFinite(n) || n < 0) return '-'; if (n < 1024) return `${n} B`; if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`; if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`; return `${(n / 1073741824).toFixed(1)} GB`; };
-      const formatDate = value => { if (!value) return '-'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? text(value) : date.toLocaleString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}); };
+      const parseTime = value => { if (!value) return NaN; if (typeof value === 'number') return value < 1e12 ? value * 1000 : value; const raw = String(value).trim(); if (/^\d{4}-\d{2}-\d{2}(T|$)/.test(raw)) { const iso = Date.parse(raw); if (!Number.isNaN(iso)) return iso; } const m = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?/i); if (!m) return Date.parse(raw); let hour = Number(m[4]) % (m[7] ? 12 : 24); if (m[7] && m[7].toUpperCase() === 'PM') hour += 12; const z = raw.match(/UTC\s*([+-])(\d{1,2}):?(\d{2})?/i); const offset = z ? (z[1] === '-' ? -1 : 1) * (Number(z[2]) * 60 + Number(z[3] || 0)) : -new Date().getTimezoneOffset(); return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), hour, Number(m[5]), Number(m[6] || 0)) - offset * 60000; };
+      const uploadTime = file => { const t = parseTime(file.captured_at || file.created_at || file.timestamp || file.updated_at); return Number.isNaN(t) ? 0 : t; };
+      const formatDate = value => { if (!value) return '-'; const date = new Date(parseTime(value)); return Number.isNaN(date.valueOf()) ? text(value) : date.toLocaleString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}); };
       const source = file => {
         const nested = file && file.source && typeof file.source === 'object' ? file.source : {};
         return text(file.source_name || file.source_label || file.sender_name || file.sender || file.chat_name || file.chat_id || nested.sender_name || nested.sender_id || nested.chat_name || nested.chat_id || nested.unified_msg_origin || nested.message_id);
@@ -510,9 +512,13 @@
           const textMatch = !query || [fileName(file), typeName(file), statusName(file), source(file), text(file.format), text(file.mime_type || file.mime), text(file.ocr_excerpt)].join(' ').toLowerCase().includes(query);
           const findMatch = !state.findIds || state.findIds.has(fileId(file));
           return statusMatch && typeMatch && sourceMatch && textMatch && findMatch; });
-        if (state.sort) { const dir = state.sort === 'desc' ? -1 : 1; state.filtered = [...state.filtered].sort((a, b) => dir * nameCollator.compare(fileName(a), fileName(b))); }
+        if (state.sort === 'asc' || state.sort === 'desc') { const dir = state.sort === 'desc' ? -1 : 1; state.filtered = [...state.filtered].sort((a, b) => dir * nameCollator.compare(fileName(a), fileName(b))); }
+        else if (state.sort === 'time-desc' || state.sort === 'time-asc') { const dir = state.sort === 'time-desc' ? -1 : 1; state.filtered = state.filtered.map((file, index) => [file, uploadTime(file), index]).sort((a, b) => (a[1] === b[1] ? 0 : dir * (a[1] - b[1])) || a[2] - b[2]).map(item => item[0]); }
+        const timeSort = state.sort.startsWith('time-') ? state.sort.slice(5) : ''; const timeButton = document.getElementById('timeSortButton');
+        if (timeButton) { timeButton.dataset.sort = timeSort === 'asc' ? 'asc' : timeSort === 'desc' ? 'desc' : ''; timeButton.querySelector('.sort-arrow').textContent = timeSort === 'asc' ? '↑' : timeSort === 'desc' ? '↓' : '↕'; timeButton.setAttribute('aria-label', `按上传时间排序，当前${timeSort === 'asc' ? '最早在前' : timeSort === 'desc' ? '最新在前' : '默认顺序'}`); timeButton.title = timeSort === 'desc' ? '上传时间：最新在前（点一下改最早在前）' : timeSort === 'asc' ? '上传时间：最早在前（点一下恢复默认）' : '按上传时间排序'; }
+        const sortSelect = document.getElementById('sortSelect'); if (sortSelect && sortSelect.value !== state.sort) sortSelect.value = state.sort;
         const sortButton = document.getElementById('nameSortButton');
-        if (sortButton) { sortButton.dataset.sort = state.sort; sortButton.querySelector('.sort-arrow').textContent = state.sort === 'asc' ? '↑' : state.sort === 'desc' ? '↓' : '↕'; sortButton.setAttribute('aria-label', `按文件名排序，当前${state.sort === 'asc' ? '升序' : state.sort === 'desc' ? '降序' : '默认顺序'}`); sortButton.title = state.sort === 'asc' ? '文件名升序（点一下改降序）' : state.sort === 'desc' ? '文件名降序（点一下恢复默认）' : '按文件名排序'; }
+        if (sortButton) { sortButton.dataset.sort = state.sort === 'asc' || state.sort === 'desc' ? state.sort : ''; sortButton.querySelector('.sort-arrow').textContent = state.sort === 'asc' ? '↑' : state.sort === 'desc' ? '↓' : '↕'; sortButton.setAttribute('aria-label', `按文件名排序，当前${state.sort === 'asc' ? '升序' : state.sort === 'desc' ? '降序' : '默认顺序'}`); sortButton.title = state.sort === 'asc' ? '文件名升序（点一下改降序）' : state.sort === 'desc' ? '文件名降序（点一下恢复默认）' : '按文件名排序'; }
         els.note.textContent = `${state.filtered.length} / ${state.files.length} 个文件`;
         if (!state.filtered.length) { els.list.innerHTML = `<div class="empty"><strong>${state.files.length ? '没有匹配的文件' : '还没有捕获文件'}</strong><p>${state.files.length ? '换个关键词或筛选条件试试。' : '当聊天中出现附件时，它们会出现在这里。'}</p></div>`; updateStats(); return; }
         const hidden = state.expanded ? 0 : Math.max(0, state.filtered.length - COLLAPSE_AT);
@@ -755,7 +761,10 @@
       document.getElementById('deleteSelectedButton').addEventListener('click', () => removeFiles([...state.selected]));
       document.getElementById('clearAllButton').addEventListener('click', clearAll);
       document.getElementById('clearFailedButton').addEventListener('click', clearFailed);
-      document.getElementById('nameSortButton').addEventListener('click', () => { state.sort = state.sort === '' ? 'asc' : state.sort === 'asc' ? 'desc' : ''; try { localStorage.setItem('ns-name-sort', state.sort); } catch (_) {} render(); });
+      const setSort = value => { state.sort = value; try { localStorage.setItem('ns-name-sort', state.sort); } catch (_) {} render(); };
+      document.getElementById('nameSortButton').addEventListener('click', () => setSort(state.sort === 'asc' ? 'desc' : state.sort === 'desc' ? '' : 'asc'));
+      document.getElementById('timeSortButton').addEventListener('click', () => setSort(state.sort === 'time-desc' ? 'time-asc' : state.sort === 'time-asc' ? '' : 'time-desc'));
+      document.getElementById('sortSelect').addEventListener('change', event => setSort(event.target.value));
       document.getElementById('saveConfigButton').addEventListener('click', saveConfig);
       els.uploadButton.addEventListener('click', () => els.uploadInput.click());
       const bundleInput = document.getElementById('bundleInput'); const bundleButton = document.getElementById('bundleButton');
