@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.5"
+PLUGIN_VERSION = "1.11.6"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -178,6 +178,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "admin_only_capture": False,
     "admin_ids": "",
     "merged_forward_results": True,
+    "private_forward_files": True,
+    "private_forward_recall_originals": True,
     "ocr_preprocess": True,
     "ocr_psm_modes": "6,11",
     "ocr_upscale_min_side": 1600,
@@ -6746,6 +6748,133 @@ class NameSearcherPlugin(Star):
                 failed.append(name)
         return failed
 
+    async def _private_forward_with_files(self, event: Any, query: str, matches: list[dict[str, Any]]) -> str:
+        """Private chat: put result files inside the merged forward.
+
+        Files built into a forward node arrive as 0 B in private chats, so the
+        results are first sent as real messages (text/images via
+        send_private_msg, files via upload_private_file), then forwarded
+        natively by message id — like selecting messages in QQ and choosing
+        合并转发 — and the originals are recalled.
+
+        Returns "fallback" when nothing was sent (caller uses the old path),
+        "ok" when the forward was sent, or "partial" when the messages went
+        out but the forward could not be built (the originals stay).
+        """
+
+        bot = getattr(event, "bot", None)
+        call_action = getattr(bot, "call_action", None)
+        raw_user = str(_event_sender_id(event) or "")
+        if not callable(call_action) or not raw_user:
+            return "fallback"
+        user_id: Any = int(raw_user) if raw_user.isdigit() else raw_user
+
+        async def call(action: str, timeout: float = 30, **kwargs: Any) -> Any:
+            result = call_action(action=action, **kwargs)
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout=timeout)
+            if isinstance(result, Mapping) and isinstance(result.get("data"), Mapping) and "status" in result:
+                result = result.get("data")
+            return result
+
+        def message_id_of(result: Any) -> str:
+            if isinstance(result, Mapping):
+                value = result.get("message_id", result.get("messageId"))
+                return "" if value is None else str(value)
+            return ""
+
+        async def send_text(text: str, image: Path | None = None) -> str:
+            segments: list[dict[str, Any]] = [{"type": "text", "data": {"text": text}}]
+            if image is not None:
+                segments.append({"type": "image", "data": {"file": image.resolve().as_uri()}})
+            return message_id_of(await call("send_private_msg", user_id=user_id, message=segments))
+
+        order: list[tuple[str, str]] = []  # ("id", message_id) or ("file", name)
+        uploaded: set[str] = set()
+        try:
+            first = await send_text(f"查找对象：{query}\n匹配数量：{len(matches)}")
+        except Exception as exc:
+            _log("warning", "NameSearcher private forward: send_private_msg failed: %s", exc)
+            return "fallback"
+        if not first:
+            return "fallback"
+        order.append(("id", first))
+        failed: list[str] = []
+        try:
+            for index, item in enumerate(matches, 1):
+                formatted = _format_result(query, [item], self.panel_base()).splitlines()
+                text = f"结果 {index}\n" + "\n".join(formatted[2:])
+                source = item.get("source") if isinstance(item.get("source"), Mapping) else {}
+                artifact_id = str(source.get("id") or "")
+                record = self.store.get(artifact_id) if artifact_id else None
+                path = self.store.path_for(record) if record else None
+                if not (record and path and path.exists()):
+                    record = None
+                image = path if record and record.get("kind") == "image" else None
+                mid = await send_text(text, image)
+                if mid:
+                    order.append(("id", mid))
+                if record and image is None and artifact_id not in uploaded:
+                    uploaded.add(artifact_id)
+                    name = str(record.get("name") or path.name)
+                    try:
+                        await call("upload_private_file", timeout=120, user_id=user_id, file=str(path), name=name)
+                        order.append(("file", name))
+                    except Exception as exc:
+                        _log("warning", "NameSearcher upload_private_file failed for %s: %s", name, exc)
+                        failed.append(name)
+        except Exception as exc:
+            _log("warning", "NameSearcher private forward: sending results failed: %s", exc)
+            return "partial"
+
+        wanted = [name for kind, name in order if kind == "file"]
+        file_ids: dict[int, str] = {}
+        if wanted:
+            await asyncio.sleep(1.5)
+            try:
+                history = await call("get_friend_msg_history", user_id=user_id, count=max(20, len(order) + 10))
+            except Exception as exc:
+                _log("warning", "NameSearcher private forward: get_friend_msg_history failed: %s", exc)
+                return "partial"
+            messages = history.get("messages") if isinstance(history, Mapping) else history
+            used: set[str] = set()
+            candidates: list[tuple[str, str]] = []
+            for message in messages if isinstance(messages, list) else []:
+                if not isinstance(message, Mapping):
+                    continue
+                for segment in message.get("message") or []:
+                    if isinstance(segment, Mapping) and segment.get("type") == "file":
+                        data = segment.get("data") if isinstance(segment.get("data"), Mapping) else {}
+                        candidates.append((str(data.get("name") or data.get("file") or ""), message_id_of(message)))
+            positions = [pos for pos, (kind, _value) in enumerate(order) if kind == "file"]
+            for pos in positions:
+                name = order[pos][1]
+                match = next((mid for file_name, mid in reversed(candidates) if file_name == name and mid and mid not in used), "")
+                if not match:
+                    _log("warning", "NameSearcher private forward: uploaded file %s not found in history", name)
+                    return "partial"
+                used.add(match)
+                file_ids[pos] = match
+        ids = [file_ids[pos] if kind == "file" else value for pos, (kind, value) in enumerate(order)]
+        try:
+            result = await call(
+                "send_private_forward_msg", timeout=120, user_id=user_id,
+                messages=[{"type": "node", "data": {"id": mid}} for mid in ids],
+            )
+        except Exception as exc:
+            _log("warning", "NameSearcher private forward: send_private_forward_msg failed: %s", exc)
+            return "partial"
+        if isinstance(result, Mapping) and result.get("status") == "failed":
+            return "partial"
+        if _as_bool(self.config.get("private_forward_recall_originals", True)):
+            for mid in ids:
+                try:
+                    await call("delete_msg", message_id=int(mid) if mid.isdigit() else mid)
+                except Exception as exc:
+                    _log("debug", "NameSearcher private forward: delete_msg %s failed: %s", mid, exc)
+        self._private_forward_failed = failed
+        return "ok"
+
     def _merged_forward_result(self, event: Any, query: str, matches: list[dict[str, Any]]) -> Any:
         """Build lookup results as one merged-forward message when supported."""
 
@@ -6884,7 +7013,16 @@ class NameSearcherPlugin(Star):
             return
         matches = self._lookup_matches(query)
         private = self._private_upload_ready(event)
-        merged_result = self._merged_forward_result(event, query, matches) if _as_bool(self.config.get("merged_forward_results", False)) else None
+        merged_on = _as_bool(self.config.get("merged_forward_results", False))
+        if private and merged_on and _as_bool(self.config.get("private_forward_files", True)) and any(record.get("kind") != "image" for record, _path in self._match_records(matches)):
+            self._private_forward_failed = []
+            status = await self._private_forward_with_files(event, query, matches)
+            if status != "fallback":
+                failed = list(getattr(self, "_private_forward_failed", []) or [])
+                if failed:
+                    yield _plain(event, "以下文件私聊发送失败，请到群里查询或用网页下载：" + "、".join(failed))
+                return
+        merged_result = self._merged_forward_result(event, query, matches) if merged_on else None
         if merged_result is not None:
             yield merged_result
         else:

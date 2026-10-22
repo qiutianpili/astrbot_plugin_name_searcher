@@ -291,6 +291,18 @@
     "hint": "开启后，/查找 的摘要和所有匹配结果会按聊天记录节点合并转发；适配器不支持该消息组件时自动回退为普通文本。",
     "default": true
   },
+  "private_forward_files": {
+    "description": "私聊结果文件放进合并转发",
+    "type": "bool",
+    "hint": "开启后，私聊 /查找 先逐条发出结果和文件，再按消息原生合并转发，文件就在聊天记录里对应结果下面；关闭则文件单独发送。",
+    "default": true
+  },
+  "private_forward_recall_originals": {
+    "description": "私聊合并转发后撤回原消息",
+    "type": "bool",
+    "hint": "合并转发成功后撤回逐条发出的原消息，只留下聊天记录。若转发里的文件打不开，可关闭此项。",
+    "default": true
+  },
   "allow_panel_delete": {
     "description": "允许面板删除文件",
     "type": "bool",

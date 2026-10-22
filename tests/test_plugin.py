@@ -1460,9 +1460,33 @@ class NameSearcherPluginTests(unittest.TestCase):
             output = asyncio.run(collect_async_generator(plugin.find(private)))
         self.assertEqual(len(output), 1)
         self.assertFalse(any(isinstance(part, File) for node in output[0][0].nodes for part in node.content))
-        self.assertEqual(calls[0][0], "upload_private_file")
-        self.assertEqual(calls[0][1]["user_id"], 42)
-        self.assertEqual(calls[0][1]["name"], "名单.xlsx")
+        uploads = [call for call in calls if call[0] == "upload_private_file"]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0][1]["user_id"], 42)
+        self.assertEqual(uploads[0][1]["name"], "名单.xlsx")
+
+        calls.clear()
+        counter = iter(range(100, 200))
+
+        class ForwardBot:
+            async def call_action(self, action, **kwargs):
+                calls.append((action, kwargs))
+                if action == "send_private_msg":
+                    return {"message_id": next(counter)}
+                if action == "get_friend_msg_history":
+                    return {"messages": [{"message_id": 999, "message": [{"type": "file", "data": {"file": "名单.xlsx"}}]}]}
+                if action == "send_private_forward_msg":
+                    return {"message_id": 1000}
+                return {}
+
+        private.bot = ForwardBot()
+        with patch.dict(sys.modules, modules):
+            output = asyncio.run(collect_async_generator(plugin.find(private)))
+        self.assertEqual(output, [])
+        forward = [call for call in calls if call[0] == "send_private_forward_msg"]
+        self.assertEqual(len(forward), 1)
+        self.assertEqual([node["data"]["id"] for node in forward[0][1]["messages"]], ["100", "101", "999"])
+        self.assertEqual(sorted(call[1]["message_id"] for call in calls if call[0] == "delete_msg"), [100, 101, 999])
 
     def test_merged_forward_results_fall_back_on_unsupported_platform(self):
         plugin = make_plugin(self.temp_path, merged_forward_results=True)
