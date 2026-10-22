@@ -62,6 +62,7 @@ def make_plugin(root: Path, **config_overrides) -> main.NameSearcherPlugin:
         "storage_dir": str(root / "files"),
         "people_file": "",
         "restrict_chat_scope": False,
+        "find_ack_text": "",
     }
     config.update(config_overrides)
     return main.NameSearcherPlugin(object(), config)
@@ -1554,6 +1555,15 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["group_id"], 555)
         self.assertEqual(nodes[-1]["data"]["content"][0]["type"], "file")
         self.assertEqual(calls[1][1], {"user_id": 42, "message_id": 1000})
+
+    def test_find_acknowledges_before_searching(self):
+        plugin = make_plugin(self.temp_path, find_ack_text="正在帮您查询…", merged_forward_results=False)
+        output = asyncio.run(collect_async_generator(plugin.find(FakeEvent([], text="/查找 张三"))))
+        self.assertEqual(output[0], "正在帮您查询…")
+        self.assertGreater(len(output), 1)
+        usage = asyncio.run(collect_async_generator(plugin.find(FakeEvent([], text="/查找"))))
+        self.assertEqual(len(usage), 1)
+        self.assertIn("用法", usage[0])
 
     def test_merged_forward_results_fall_back_on_unsupported_platform(self):
         plugin = make_plugin(self.temp_path, merged_forward_results=True)

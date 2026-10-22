@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.8"
+PLUGIN_VERSION = "1.11.9"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -180,6 +180,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "merged_forward_results": True,
     "private_forward_files": True,
     "private_forward_staging_group": "",
+    "find_ack_text": "正在帮您查询…",
     "portal_rate_per_minute": 5,
     "portal_single_page": True,
     "portal_max_pages_per_ip": 2,
@@ -7175,6 +7176,9 @@ class NameSearcherPlugin(Star):
         if not query:
             yield _plain(event, "用法：/查找 姓名（支持通配符：/查找 张* 、/查找 王小?）")
             return
+        ack = str(self.config.get("find_ack_text", "正在帮您查询…") or "").strip()
+        if ack:
+            yield _plain(event, ack)
         if _has_wildcard(query):
             yield _plain(event, _format_wildcard_result(self.people.wildcard_search(query)))
             return

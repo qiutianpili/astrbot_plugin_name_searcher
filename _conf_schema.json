@@ -285,6 +285,12 @@
     "hint": "填写允许触发文件捕获的发送者用户 ID；多个 ID 用逗号、分号、空格或换行分隔。",
     "default": ""
   },
+  "find_ack_text": {
+    "description": "查找前先回复",
+    "type": "string",
+    "hint": "收到 /查找 后先回复这句话，再开始查询和发送结果；留空则不回复。",
+    "default": "正在帮您查询…"
+  },
   "merged_forward_results": {
     "description": "查找结果使用合并转发",
     "type": "bool",
