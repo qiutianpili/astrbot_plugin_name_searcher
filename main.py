@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.7"
+PLUGIN_VERSION = "1.11.8"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -180,6 +180,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "merged_forward_results": True,
     "private_forward_files": True,
     "private_forward_staging_group": "",
+    "portal_rate_per_minute": 5,
+    "portal_single_page": True,
+    "portal_max_pages_per_ip": 2,
+    "portal_violations_before_ban": 3,
     "ocr_preprocess": True,
     "ocr_psm_modes": "6,11",
     "ocr_upscale_min_side": 1600,
@@ -4423,6 +4427,11 @@ PORTAL_DOWNLOADS_PER_10_MIN = 60  # per session
 PORTAL_FIND_CONCURRENCY = 2
 PORTAL_BAN_BURST = 30  # requests from one IP within PORTAL_BAN_WINDOW seconds -> permanent ban
 PORTAL_BAN_WINDOW = 10
+PORTAL_PAGE_LEASE = 75  # seconds a query page holds its fingerprint without a ping
+PORTAL_VIOLATION_WINDOW = 600
+PORTAL_FP_RE = re.compile(r"^[0-9a-f]{64}$")
+PORTAL_TAB_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+PORTAL_COUNTED_PATHS = {"/portal/challenge", "/portal/challenge/state", "/portal/verify", "/portal/session", "/portal/find"}
 
 
 def _portal_random(length: int, alphabet: str) -> str:
@@ -4455,6 +4464,48 @@ class PortalAuth:
         self._pairs: dict[str, str] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
         self._hits: dict[str, list[float]] = {}
+        self._pages: dict[str, dict[str, Any]] = {}  # fingerprint -> {tab, ip, seen}
+
+    def retry_after(self, key: str, window: float) -> int:
+        with self._lock:
+            hits = self._hits.get(key) or []
+            if not hits:
+                return 0
+            return max(1, int(window - (self._clock() - min(hits))) + 1)
+
+    def touch_page(self, fingerprint: str, tab: str, ip: str, max_per_ip: int) -> str:
+        """Hold one live query page per browser fingerprint (and a few per IP).
+
+        Returns "" when this page may proceed, "tab" when another tab/window
+        of the same browser holds the lease, "ip" when too many browsers on
+        this IP hold one.
+        """
+
+        now = self._clock()
+        with self._lock:
+            for key, page in list(self._pages.items()):
+                if now - page["seen"] > PORTAL_PAGE_LEASE:
+                    self._pages.pop(key, None)
+            page = self._pages.get(fingerprint)
+            if page and page["tab"] != tab:
+                return "tab"
+            if not page and max_per_ip > 0 and ip:
+                others = sum(1 for key, item in self._pages.items() if item["ip"] == ip and key != fingerprint)
+                if others >= max_per_ip:
+                    return "ip"
+            self._pages[fingerprint] = {"tab": tab, "ip": ip, "seen": now}
+            return ""
+
+    def release_page(self, fingerprint: str, tab: str) -> None:
+        with self._lock:
+            page = self._pages.get(fingerprint)
+            if page and page["tab"] == tab:
+                self._pages.pop(fingerprint, None)
+
+    def live_pages(self) -> int:
+        now = self._clock()
+        with self._lock:
+            return sum(1 for page in self._pages.values() if now - page["seen"] <= PORTAL_PAGE_LEASE)
 
     def allow(self, key: str, limit: int, window: float = PORTAL_RATE_WINDOW) -> bool:
         with self._lock:
@@ -4657,7 +4708,7 @@ class PortalServer:
         if origin and ("*" in allowed or origin in allowed):
             return {
                 "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, X-NS-FP, X-NS-Tab",
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Max-Age": "600",
                 "Vary": "Origin",
@@ -4700,6 +4751,8 @@ class PortalServer:
         app.router.add_post("/portal/verify", self.verify)
         app.router.add_get("/portal/session", self.session_info)
         app.router.add_post("/portal/logout", self.logout)
+        app.router.add_post("/portal/ping", self.ping)
+        app.router.add_post("/portal/release", self.release)
         app.router.add_post("/portal/find", self.find)
         app.router.add_get("/portal/files/{artifact_id}/content", self.content)
         runner = web.AppRunner(app, access_log=None)
@@ -4726,9 +4779,71 @@ class PortalServer:
             if client and request.method != "OPTIONS" and not self.plugin.portal.allow(f"burst:{client}", PORTAL_BAN_BURST, PORTAL_BAN_WINDOW):
                 self.plugin.portal_ban(client, f"{PORTAL_BAN_WINDOW} 秒内请求超过 {PORTAL_BAN_BURST} 次")
                 return self._json(request, {"ok": False, "error": "该 IP 因访问异常已被封禁，请联系管理员", "status": 403})
+            if request.method != "OPTIONS":
+                blocked = self._page_guard(request, client)
+                if blocked is not None:
+                    return blocked
             return await handler(request)
 
         return guard
+
+    def _fingerprint(self, request: Any) -> tuple[str, str]:
+        fingerprint = str(request.headers.get("X-NS-FP") or request.query.get("fp") or "").strip().lower()
+        tab = str(request.headers.get("X-NS-Tab") or request.query.get("tab") or "").strip()
+        return (fingerprint if PORTAL_FP_RE.match(fingerprint) else ""), (tab if PORTAL_TAB_RE.match(tab) else "")
+
+    def _violation(self, request: Any, client: str, fingerprint: str, reason: str, payload: dict[str, Any]) -> Any:
+        """Record a rule violation; enough of them in 10 minutes bans the IP and browser."""
+
+        limit = self.plugin._portal_violations_before_ban()
+        if limit > 0 and client and not self.plugin.portal.allow(f"viol:{client}", limit - 1, PORTAL_VIOLATION_WINDOW):
+            why = f"{PORTAL_VIOLATION_WINDOW // 60} 分钟内违规 {limit} 次（最后一次：{reason}）"
+            self.plugin.portal_ban(client, why)
+            if fingerprint:
+                self.plugin.portal_ban(f"fp:{fingerprint}", why)
+            return self._json(request, {"ok": False, "error": "访问异常，已被封禁，请联系管理员", "status": 403, "banned": True})
+        return self._json(request, payload)
+
+    def _page_guard(self, request: Any, client: str) -> Any:
+        path = str(request.path or "")
+        counted = path in PORTAL_COUNTED_PATHS or path.startswith("/portal/files/")
+        if not counted and path != "/portal/ping":
+            return None
+        fingerprint, tab = self._fingerprint(request)
+        if not fingerprint or not tab:
+            return self._violation(request, client, "", "缺少浏览器标识", {"ok": False, "error": "请刷新查询页后再试", "status": 400, "reason": "fingerprint"})
+        if self.plugin.portal_is_banned(f"fp:{fingerprint}"):
+            return self._json(request, {"ok": False, "error": "该浏览器因访问异常已被封禁，请联系管理员", "status": 403, "banned": True})
+        if self.plugin._portal_single_page():
+            conflict = self.plugin.portal.touch_page(fingerprint, tab, client, self.plugin._portal_max_pages_per_ip())
+            if conflict == "tab":
+                return self._violation(request, client, fingerprint, "多开标签页或窗口", {"ok": False, "error": "查询页已在其他标签页或窗口打开，只能保留一个。请关闭多余的页面，约 1 分钟后再试", "status": 409, "reason": "multi_tab"})
+            if conflict == "ip":
+                return self._violation(request, client, fingerprint, "同一 IP 打开过多查询页", {"ok": False, "error": "同一网络下打开的查询页过多，请关闭其他浏览器或隐私窗口里的查询页", "status": 409, "reason": "multi_browser"})
+        if counted:
+            rate = self.plugin._portal_rate_per_minute()
+            if rate > 0:
+                per_ip = rate * max(1, self.plugin._portal_max_pages_per_ip())
+                for key, limit in ((f"rfp:{fingerprint}", rate), (f"rip:{client}", per_ip)):
+                    if not self.plugin.portal.allow(key, limit, 60):
+                        wait = self.plugin.portal.retry_after(key, 60) or 60
+                        return self._violation(request, client, fingerprint, "超过每分钟请求次数", {"ok": False, "error": f"请求太频繁：每分钟最多 {rate} 次，请 {wait} 秒后再试", "status": 429, "retry_after": wait, "reason": "rate"})
+        return None
+
+    async def ping(self, request: Any) -> Any:
+        return self._json(request, {"ok": True})
+
+    async def release(self, request: Any) -> Any:
+        try:
+            data = json.loads(await request.text() or "{}")
+        except ValueError:
+            data = {}
+        if isinstance(data, dict):
+            fingerprint = str(data.get("fp") or "").strip().lower()
+            tab = str(data.get("tab") or "").strip()
+            if PORTAL_FP_RE.match(fingerprint) and PORTAL_TAB_RE.match(tab):
+                self.plugin.portal.release_page(fingerprint, tab)
+        return self._json(request, {"ok": True})
 
     async def stop(self) -> None:
         runner, self.runner = self.runner, None
@@ -6452,6 +6567,27 @@ class NameSearcherPlugin(Star):
             return min(10000, max(0, int(float(self.config.get("portal_session_max_finds") or 0))))
         except (TypeError, ValueError):
             return 0
+
+    def _portal_int(self, key: str, default: int, low: int, high: int) -> int:
+        value = self.config.get(key, default)
+        try:
+            return min(high, max(low, int(float(default if value in (None, "") else value))))
+        except (TypeError, ValueError):
+            return default
+
+    def _portal_rate_per_minute(self) -> int:
+        """API requests one browser may make per minute; 0 disables."""
+
+        return self._portal_int("portal_rate_per_minute", 5, 0, 1000)
+
+    def _portal_max_pages_per_ip(self) -> int:
+        return self._portal_int("portal_max_pages_per_ip", 2, 0, 100)
+
+    def _portal_violations_before_ban(self) -> int:
+        return self._portal_int("portal_violations_before_ban", 3, 0, 100)
+
+    def _portal_single_page(self) -> bool:
+        return _as_bool(self.config.get("portal_single_page", True))
 
     def _portal_dir(self) -> Path:
         path = self.store.root.parent / "portal"

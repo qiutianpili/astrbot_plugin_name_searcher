@@ -352,6 +352,60 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(plugin.portal.revoke_user("42"), 1)
         self.assertIsNone(plugin.portal.session(session["token"]))
 
+    def test_portal_page_guard_rate_tabs_and_ban(self):
+        try:
+            import aiohttp  # noqa: F401
+        except Exception:
+            self.skipTest("aiohttp unavailable")
+        import socket
+        sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
+                             portal_enabled=True, portal_port=port, portal_allowed_origins="*")
+
+        async def scenario():
+            import aiohttp
+            await plugin.sync_portal()
+            base = f"http://127.0.0.1:{port}/portal"
+            fp1, fp2 = "b" * 64, "c" * 64
+            try:
+                async with aiohttp.ClientSession() as http:
+                    async with http.post(base + "/challenge", headers={"X-Real-IP": "198.51.100.1"}) as resp:
+                        self.assertEqual(resp.status, 400)
+                    one = {"X-Real-IP": "198.51.100.2", "X-NS-FP": fp1, "X-NS-Tab": "tab-one-1"}
+                    for _ in range(5):
+                        async with http.post(base + "/challenge/state", json={}, headers=one) as resp:
+                            self.assertNotEqual(resp.status, 429)
+                    async with http.post(base + "/ping", headers=one) as resp:
+                        self.assertEqual(resp.status, 200)
+                    async with http.post(base + "/challenge/state", json={}, headers=one) as resp:
+                        self.assertEqual(resp.status, 429)
+                        self.assertGreater((await resp.json())["retry_after"], 0)
+                    other_tab = {**one, "X-NS-Tab": "tab-two-2"}
+                    async with http.post(base + "/ping", headers=other_tab) as resp:
+                        self.assertEqual(resp.status, 409)
+                    async with http.post(base + "/ping", headers=other_tab) as resp:
+                        self.assertEqual(resp.status, 403)
+                        self.assertTrue((await resp.json())["banned"])
+                    self.assertTrue(plugin.portal_is_banned("198.51.100.2"))
+                    self.assertTrue(plugin.portal_is_banned(f"fp:{fp1}"))
+                    async with http.post(base + "/ping", headers={"X-Real-IP": "198.51.100.3", "X-NS-FP": fp1, "X-NS-Tab": "tab-one-1"}) as resp:
+                        self.assertEqual(resp.status, 403)
+                    a = {"X-Real-IP": "198.51.100.4", "X-NS-FP": fp2, "X-NS-Tab": "tab-aaaa"}
+                    async with http.post(base + "/ping", headers=a) as resp:
+                        self.assertEqual(resp.status, 200)
+                    async with http.post(base + "/release", data=json.dumps({"fp": fp2, "tab": "tab-aaaa"})) as resp:
+                        self.assertEqual(resp.status, 200)
+                    async with http.post(base + "/ping", headers={**a, "X-NS-Tab": "tab-bbbb"}) as resp:
+                        self.assertEqual(resp.status, 200)
+                    plugin.config["portal_max_pages_per_ip"] = 1
+                    async with http.post(base + "/ping", headers={**a, "X-NS-FP": "d" * 64}) as resp:
+                        self.assertEqual(resp.status, 409)
+            finally:
+                plugin._terminating = True
+                await plugin._portal_server.stop()
+
+        asyncio.run(scenario())
+
     def test_portal_http_endpoints(self):
         try:
             import aiohttp  # noqa: F401
@@ -361,7 +415,7 @@ class NameSearcherPluginTests(unittest.TestCase):
         import socket
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
-                             portal_enabled=True, portal_port=port, portal_allowed_origins="https://example.org", portal_session_max_finds=0)
+                             portal_enabled=True, portal_port=port, portal_allowed_origins="https://example.org", portal_session_max_finds=0, portal_rate_per_minute=0)
         record = plugin.store.add_bytes("名单.txt", "张三".encode("utf-8"), kind="document", mime="text/plain", source={})
         plugin.store.update(record["id"], download_status="ok", ocr_text="1 张三 计网")
         other = plugin.store.add_bytes("其他.txt", b"secret", kind="document", mime="text/plain", source={})
@@ -372,7 +426,7 @@ class NameSearcherPluginTests(unittest.TestCase):
             await plugin.sync_portal()
             base = f"http://127.0.0.1:{port}/portal"
             try:
-                async with aiohttp.ClientSession(headers={"Origin": "https://example.org"}) as http:
+                async with aiohttp.ClientSession(headers={"Origin": "https://example.org", "X-NS-FP": "a" * 64, "X-NS-Tab": "tab-00001"}) as http:
                     async with http.post(base + "/challenge") as resp:
                         self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "https://example.org")
                         challenge = await resp.json()

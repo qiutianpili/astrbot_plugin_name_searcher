@@ -383,6 +383,30 @@
     "default": 2,
     "hint": "每次网页临时登录最多可查询的次数，0 表示不限。用完后需重新获取验证码。"
   },
+  "portal_rate_per_minute": {
+    "description": "查询页每分钟请求上限",
+    "type": "int",
+    "hint": "按浏览器指纹计：获取识别码、验证、查询、预览/下载都算一次；同一 IP 上限为此值 × 每 IP 页面数。0 表示不限。",
+    "default": 5
+  },
+  "portal_single_page": {
+    "description": "只允许打开一个查询页",
+    "type": "bool",
+    "hint": "同一浏览器（含隐私窗口，按指纹识别）只能有一个查询页在用，多开的页面会被拒绝并记一次违规。",
+    "default": true
+  },
+  "portal_max_pages_per_ip": {
+    "description": "每个 IP 同时在用的查询页数",
+    "type": "int",
+    "hint": "同一网络下不同浏览器同时打开查询页的上限。校园网/宿舍多人共用出口 IP 时可调大；0 表示不限。",
+    "default": 2
+  },
+  "portal_violations_before_ban": {
+    "description": "违规几次后封禁 IP",
+    "type": "int",
+    "hint": "10 分钟内超频、多开等违规达到此次数，永久封禁该 IP 和浏览器指纹（面板可解封）。0 表示只拒绝不封禁。",
+    "default": 3
+  },
   "portal_allowed_groups": {
     "description": "可申请验证码的群聊 ID",
     "type": "text",
