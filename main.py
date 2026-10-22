@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.9"
+PLUGIN_VERSION = "1.11.10"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -178,7 +178,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "admin_only_capture": False,
     "admin_ids": "",
     "merged_forward_results": True,
-    "private_forward_files": True,
+    "private_forward_files": False,
     "private_forward_staging_group": "",
     "find_ack_text": "正在帮您查询…",
     "portal_rate_per_minute": 5,
@@ -7185,7 +7185,7 @@ class NameSearcherPlugin(Star):
         matches = self._lookup_matches(query)
         private = self._private_upload_ready(event)
         merged_on = _as_bool(self.config.get("merged_forward_results", False))
-        if private and merged_on and _as_bool(self.config.get("private_forward_files", True)) and any(record.get("kind") != "image" for record, _path in self._match_records(matches)):
+        if private and merged_on and _as_bool(self.config.get("private_forward_files", False)) and any(record.get("kind") != "image" for record, _path in self._match_records(matches)):
             if await self._private_forward_with_files(event, query, matches) == "ok":
                 return
         merged_result = self._merged_forward_result(event, query, matches) if merged_on else None

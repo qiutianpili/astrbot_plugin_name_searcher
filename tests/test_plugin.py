@@ -1536,6 +1536,7 @@ class NameSearcherPluginTests(unittest.TestCase):
 
         private.bot = ForwardBot()
         private.get_self_id = lambda: "7"
+        plugin.config["private_forward_files"] = True
         with patch.dict(sys.modules, modules):
             output = asyncio.run(collect_async_generator(plugin.find(private)))
         self.assertEqual(output, [])
