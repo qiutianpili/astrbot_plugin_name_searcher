@@ -1763,6 +1763,25 @@ def _read_text_from_file(
     return "", 0.0
 
 
+def _block_default_llm(event: Any) -> None:
+    """Keep AstrBot's default LLM chain off this command message.
+
+    AstrBot asks the LLM when a wake-prefixed message produced no send
+    (e.g. the private merged forward is delivered through call_action), so
+    plugin commands opt out explicitly. Note the inverted naming upstream:
+    should_call_llm(True) means "do not call the default LLM".
+    """
+
+    try:
+        method = getattr(event, "should_call_llm", None)
+        if callable(method):
+            method(True)
+        else:
+            setattr(event, "call_llm", True)
+    except Exception:
+        pass
+
+
 def _event_value(event: Any, *names: str) -> Any:
     """Return the first non-empty event value across adapter API variants."""
 
@@ -6993,6 +7012,7 @@ class NameSearcherPlugin(Star):
 
     @filter.command("验证码", alias={"查询码"})
     async def portal_code(self, event: AstrMessageEvent, pair_code: str = ""):
+        _block_default_llm(event)
         code = _parse_command_text(event, "验证码", pair_code) or _parse_command_text(event, "查询码", pair_code)
         code = re.sub(r"[^A-Za-z0-9]", "", code)
         if not _as_bool(self.config.get("portal_enabled", False)):
@@ -7012,6 +7032,7 @@ class NameSearcherPlugin(Star):
 
     @filter.command("查找")
     async def find(self, event: AstrMessageEvent, name: str = ""):
+        _block_default_llm(event)
         if not self.is_event_allowed(event):
             return
         query = _parse_command_text(event, "查找", name)
@@ -7041,6 +7062,7 @@ class NameSearcherPlugin(Star):
 
     @filter.command("图片转表格")
     async def image_table(self, event: AstrMessageEvent, artifact_id: str = ""):
+        _block_default_llm(event)
         if not self.is_event_allowed(event):
             return
         query = _parse_command_text(event, "图片转表格", artifact_id)
@@ -7053,6 +7075,7 @@ class NameSearcherPlugin(Star):
 
     @filter.command("文件面板")
     async def file_panel(self, event: AstrMessageEvent):
+        _block_default_llm(event)
         if not self.is_event_allowed(event):
             return
         url = self.panel_base() + "/"
@@ -7070,6 +7093,7 @@ class NameSearcherPlugin(Star):
 
     @filter.command("捕获进度")
     async def capture_progress(self, event: AstrMessageEvent, progress_id: str = ""):
+        _block_default_llm(event)
         if not self.is_event_allowed(event):
             return
         query = _parse_command_text(event, "捕获进度", progress_id)
