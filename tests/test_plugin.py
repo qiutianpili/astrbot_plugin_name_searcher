@@ -1475,18 +1475,31 @@ class NameSearcherPluginTests(unittest.TestCase):
                     return {"message_id": next(counter)}
                 if action == "get_friend_msg_history":
                     return {"messages": [{"message_id": 999, "message": [{"type": "file", "data": {"file": "名单.xlsx"}}]}]}
-                if action == "send_private_forward_msg":
+                if action in {"send_private_forward_msg", "send_group_forward_msg"}:
                     return {"message_id": 1000}
                 return {}
 
         private.bot = ForwardBot()
+        private.get_self_id = lambda: "7"
         with patch.dict(sys.modules, modules):
             output = asyncio.run(collect_async_generator(plugin.find(private)))
         self.assertEqual(output, [])
         forward = [call for call in calls if call[0] == "send_private_forward_msg"]
         self.assertEqual(len(forward), 1)
         self.assertEqual([node["data"]["id"] for node in forward[0][1]["messages"]], ["100", "101", "999"])
-        self.assertEqual(sorted(call[1]["message_id"] for call in calls if call[0] == "delete_msg"), [100, 101, 999])
+        self.assertEqual(forward[0][1]["user_id"], 42)
+        self.assertTrue(all(call[1]["user_id"] == 7 for call in calls if call[0] in {"send_private_msg", "upload_private_file", "get_friend_msg_history"}))
+        self.assertFalse(any(call[0] == "delete_msg" for call in calls))
+
+        calls.clear()
+        plugin.config["private_forward_staging_group"] = "555"
+        with patch.dict(sys.modules, modules):
+            output = asyncio.run(collect_async_generator(plugin.find(private)))
+        self.assertEqual([call[0] for call in calls], ["send_group_forward_msg", "forward_friend_single_msg"])
+        nodes = calls[0][1]["messages"]
+        self.assertEqual(calls[0][1]["group_id"], 555)
+        self.assertEqual(nodes[-1]["data"]["content"][0]["type"], "file")
+        self.assertEqual(calls[1][1], {"user_id": 42, "message_id": 1000})
 
     def test_merged_forward_results_fall_back_on_unsupported_platform(self):
         plugin = make_plugin(self.temp_path, merged_forward_results=True)
