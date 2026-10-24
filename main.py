@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.11"
+PLUGIN_VERSION = "1.11.12"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -181,7 +181,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "private_forward_files": False,
     "private_forward_staging_group": "",
     "find_ack_text": "正在帮您查询…",
-    "portal_rate_per_minute": 5,
+    "portal_rate_per_minute": 30,
     "portal_single_page": True,
     "portal_max_pages_per_ip": 2,
     "portal_violations_before_ban": 3,
@@ -6579,7 +6579,7 @@ class NameSearcherPlugin(Star):
     def _portal_rate_per_minute(self) -> int:
         """API requests one browser may make per minute; 0 disables."""
 
-        return self._portal_int("portal_rate_per_minute", 5, 0, 1000)
+        return self._portal_int("portal_rate_per_minute", 30, 0, 1000)
 
     def _portal_max_pages_per_ip(self) -> int:
         return self._portal_int("portal_max_pages_per_ip", 2, 0, 100)

@@ -393,7 +393,7 @@
     "description": "查询页每分钟请求上限",
     "type": "int",
     "hint": "按浏览器指纹计：获取识别码、验证、查询、预览/下载都算一次；同一 IP 上限为此值 × 每 IP 页面数。0 表示不限。",
-    "default": 5
+    "default": 30
   },
   "portal_single_page": {
     "description": "只允许打开一个查询页",

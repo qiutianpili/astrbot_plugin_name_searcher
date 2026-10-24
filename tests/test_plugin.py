@@ -353,6 +353,9 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(plugin.portal.revoke_user("42"), 1)
         self.assertIsNone(plugin.portal.session(session["token"]))
 
+    def test_portal_rate_default_is_30(self):
+        self.assertEqual(main.DEFAULT_CONFIG["portal_rate_per_minute"], 30)
+
     def test_portal_page_guard_rate_tabs_and_ban(self):
         try:
             import aiohttp  # noqa: F401
@@ -361,7 +364,7 @@ class NameSearcherPluginTests(unittest.TestCase):
         import socket
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
         plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False,
-                             portal_enabled=True, portal_port=port, portal_allowed_origins="*")
+                             portal_enabled=True, portal_port=port, portal_allowed_origins="*", portal_rate_per_minute=5)
 
         async def scenario():
             import aiohttp
