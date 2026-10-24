@@ -186,12 +186,18 @@
     .group-title { margin-bottom: 12px; font: 500 12px/1.3 var(--sans); letter-spacing: .02em; color: var(--text-secondary); }
     .config-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
     .field { padding: 14px 16px; border-radius: var(--r-m); background: var(--fill-on); border: 1px solid var(--stroke-2); }
-    .field > label:first-child { display: block; margin-bottom: 8px; font: 500 13px/1.3 var(--sans); color: var(--text-secondary); }
+    .field > label:first-child, .field > .field-label { display: block; margin-bottom: 8px; font: 500 13px/1.3 var(--sans); color: var(--text-secondary); }
     .field input:not([type="checkbox"]), .field textarea, .field select { width: 100%; padding: 9px 12px; border-radius: var(--r-xs); border: 1px solid var(--stroke); background: var(--fill-card); font-size: 14px; transition: border-color var(--dur); }
     .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--fill-primary); }
     .field textarea { min-height: 64px; resize: vertical; }
     .field select[multiple] { min-height: 120px; padding: 6px; }
     .field select[multiple] option { padding: 6px 8px; border-radius: 6px; }
+    .check-list { display: grid; gap: 2px; max-height: 260px; overflow: auto; padding: 6px; border: 1px solid var(--stroke-primary); border-radius: 14px; background: var(--fill-primary-on); }
+    .check-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; cursor: pointer; font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
+    .check-item:hover { background: var(--fill-tertiary); }
+    .check-item input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--fill-primary); cursor: pointer; }
+    .check-item:has(input:checked) { background: var(--fill-tertiary); font-weight: 600; }
+    .check-empty { padding: 8px 10px; font-size: 13px; color: var(--text-secondary); }
     .field-wide { grid-column: span 2; }
     .field-full { grid-column: 1 / -1; }
     .field-hint { display: block; margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
@@ -253,7 +259,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.10</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.11.11</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -337,9 +343,9 @@
           <div class="field"><label for="visionFileScope">模型处理范围</label><select id="visionFileScope"><option value="image_pdf">只处理图片和 PDF</option><option value="all">所有文件</option></select><small class="field-hint">视觉识别和 LLM 审核都按这个范围。</small></div>
           <div class="field"><label for="visionReviewMaxPages">每份文件送审页数</label><input id="visionReviewMaxPages" type="number" min="0" max="100" step="1" placeholder="10"><small class="field-hint">每页每个模型调用一次；0 表示全部页（最多 100）。超出的页仍保留本地识别结果。</small></div>
           <div class="field"><label for="visionConsensusEnabled">多模型共识</label><label class="toggle-row">综合多个模型的结果<input id="visionConsensusEnabled" type="checkbox"></label></div>
-          <div class="field field-wide"><label for="visionModelTargets">视觉模型</label><select id="visionModelTargets" multiple size="5" aria-label="视觉模型"></select><small class="field-hint">可多选（按住 Ctrl / ⌘）；不选则使用当前会话的模型。</small></div>
+          <div class="field field-wide"><span class="field-label" id="visionModelTargetsLabel">视觉模型</span><div id="visionModelTargets" class="check-list" role="group" aria-labelledby="visionModelTargetsLabel"></div><small class="field-hint">勾选一个或多个；都不勾则使用当前会话的模型。</small></div>
           <div class="field"><label for="llmReviewEnabled">LLM 结果审核</label><label class="toggle-row">识别后再由 LLM 审核修正<input id="llmReviewEnabled" type="checkbox"></label></div>
-          <div class="field field-wide"><label for="llmReviewTargets">LLM 审核模型</label><select id="llmReviewTargets" multiple size="5" aria-label="LLM 审核模型"></select><small class="field-hint">可多选；多个模型时由第一个模型汇总。不选则使用当前会话的模型。</small></div>
+          <div class="field field-wide"><span class="field-label" id="llmReviewTargetsLabel">LLM 审核模型</span><div id="llmReviewTargets" class="check-list" role="group" aria-labelledby="llmReviewTargetsLabel"></div><small class="field-hint">勾选一个或多个；多个模型时由列表中最靠前的已勾选模型汇总。都不勾则使用当前会话的模型。</small></div>
         </div>
       </div>
       <div class="config-group">
@@ -594,7 +600,8 @@
       function renderVisionTargetOptions(providers, selectedTargets) {
         const options = providers.flatMap(item => (Array.isArray(item.models) && item.models.length ? item.models : ['']).map(model => ({value: model ? `${item.id || item.value}::${model}` : `${item.id || item.value}::`, label: model ? `${item.label || item.id} / ${model}` : `${item.label || item.id} / 默认模型`})));
         selectedTargets.forEach(value => { if (!options.some(item => item.value === value)) options.push({value, label: `${value}（已配置）`}); });
-        return options.map(item => `<option value="${escape(item.value)}"${selectedTargets.includes(item.value) ? ' selected' : ''}>${escape(item.label)}</option>`).join('');
+        if (!options.length) return '<div class="check-empty">没有可用的模型提供商</div>';
+        return options.map(item => `<label class="check-item"><input type="checkbox" value="${escape(item.value)}"${selectedTargets.includes(item.value) ? ' checked' : ''}><span>${escape(item.label)}</span></label>`).join('');
       }
 
       async function loadFiles() {
@@ -736,9 +743,9 @@
         const payload = {
           restrict_chat_scope: els.scope.checked, allowed_group_ids: els.groups.value.trim(), allowed_private_ids: els.privates.value.trim(),
           admin_only_capture: els.adminOnlyCapture.checked, admin_ids: els.adminIds.value.trim(), merged_forward_results: els.mergedForwardResults.checked,
-          vision_enabled: els.visionEnabled.checked, vision_model_targets: [...els.visionModelTargets.selectedOptions].map(option => option.value).join('\n'), vision_provider: '', vision_model: '',
+          vision_enabled: els.visionEnabled.checked, vision_model_targets: [...els.visionModelTargets.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value).join('\n'), vision_provider: '', vision_model: '',
           vision_review_max_pages: (() => { const raw = String(els.visionReviewMaxPages.value).trim(); const n = Math.floor(Number(raw)); return raw === '' || !Number.isFinite(n) ? 10 : Math.max(0, Math.min(100, n)); })(), vision_consensus_enabled: els.visionConsensusEnabled.checked,
-          llm_review_enabled: els.llmReviewEnabled.checked, llm_review_targets: [...els.llmReviewTargets.selectedOptions].map(option => option.value).join('\n'), llm_review_provider: '', llm_review_model: '',
+          llm_review_enabled: els.llmReviewEnabled.checked, llm_review_targets: [...els.llmReviewTargets.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value).join('\n'), llm_review_provider: '', llm_review_model: '',
           vision_file_scope: els.visionFileScope.value, import_model_review: els.importModelReview.checked,
           capture_window_enabled: interval > 0, capture_interval_seconds: interval > 0 ? interval : (Number(state.config.capture_interval_seconds) || 30),
           notify_encoding_issues: els.notifyEncodingIssues.checked,
