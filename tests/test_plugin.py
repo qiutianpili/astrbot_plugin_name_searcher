@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import time
+import urllib.parse
 import types
 import unittest
 import zipfile
@@ -459,6 +460,14 @@ class NameSearcherPluginTests(unittest.TestCase):
                         self.assertEqual(resp.status, 200)
                         self.assertEqual((await resp.read()).decode("utf-8"), "张三")
                         self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+                    async with http.get(f"{base}/files/archive", params={"token": token, "ids": f"{record['id']},{other['id']}", "name": "张*"}) as resp:
+                        self.assertEqual(resp.status, 200)
+                        self.assertIn(".zip", urllib.parse.unquote(resp.headers.get("Content-Disposition", "")))
+                        with zipfile.ZipFile(io.BytesIO(await resp.read())) as bundle:
+                            self.assertEqual(bundle.namelist(), ["名单.txt"])  # files outside the result are dropped
+                            self.assertEqual(bundle.read("名单.txt").decode("utf-8"), "张三")
+                    async with http.get(f"{base}/files/{record['id']}/content", params={"token": token, "inline": "1"}) as resp:
+                        self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))  # non-images never inline
                     bad = {"X-Real-IP": "203.0.113.9"}
                     for _ in range(main.PORTAL_BAN_BURST):
                         async with http.get(base + "/health", headers=bad) as resp:
@@ -478,8 +487,8 @@ class NameSearcherPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
         status = plugin.portal_status()
-        self.assertEqual([item["action"] for item in status["audit"]][:5], ["ban", "download", "find", "find", "login"])
-        self.assertEqual(status["users"][0]["downloads"], 1)
+        self.assertEqual([item["action"] for item in status["audit"]][:7], ["ban", "download", "download", "download", "find", "find", "login"])
+        self.assertEqual(status["users"][0]["downloads"], 3)
         self.assertEqual(plugin.portal_delete_audit([status["audit"][0]["id"]]), 1)
         self.assertEqual(plugin.portal_status()["audit"][0]["action"], "download")
         self.assertGreater(plugin.portal_delete_audit(clear_all=True), 0)

@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.11.13"
+PLUGIN_VERSION = "1.12.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -4425,6 +4425,9 @@ PORTAL_RATE_WINDOW = 600
 PORTAL_MAX_OPEN_CHALLENGES = 500
 PORTAL_FINDS_PER_MINUTE = 20  # per session
 PORTAL_DOWNLOADS_PER_10_MIN = 60  # per session
+PORTAL_PREVIEWS_PER_10_MIN = 400  # inline image previews per session (not counted by the per-minute page limit)
+PORTAL_ARCHIVE_MAX_FILES = 200
+PORTAL_ARCHIVE_MAX_BYTES = 300 * 1024 * 1024
 PORTAL_FIND_CONCURRENCY = 2
 PORTAL_BAN_BURST = 30  # requests from one IP within PORTAL_BAN_WINDOW seconds -> permanent ban
 PORTAL_BAN_WINDOW = 10
@@ -4651,6 +4654,38 @@ class PortalAuth:
             ]
 
 
+def _portal_is_image(record: Mapping[str, Any]) -> bool:
+    name = str(record.get("name") or "").lower()
+    return str(record.get("kind") or "") == "image" or str(record.get("mime") or "").startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"))
+
+
+def _portal_build_archive(entries: list[tuple[Path, str, str]]) -> Path:
+    """Write the selected result files into a temporary zip (UTF-8 names, duplicates renamed)."""
+
+    handle = tempfile.NamedTemporaryFile(prefix="ns-portal-", suffix=".zip", delete=False)
+    handle.close()
+    target = Path(handle.name)
+    used: set[str] = set()
+    stored = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip", ".7z", ".rar", ".gz", ".xlsx", ".docx", ".pptx", ".pdf", ".mp4"}
+    try:
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path, name, _artifact_id in entries:
+                clean = _safe_name(name) or path.name
+                suffix = Path(clean).suffix
+                stem = clean[: len(clean) - len(suffix)] if suffix else clean
+                candidate, index = clean, 2
+                while candidate.lower() in used:
+                    candidate = f"{stem}({index}){suffix}"
+                    index += 1
+                used.add(candidate.lower())
+                method = zipfile.ZIP_STORED if suffix.lower() in stored else zipfile.ZIP_DEFLATED
+                archive.write(path, candidate, compress_type=method)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def _portal_audit_id(line: str) -> str:
     return hashlib.sha1(str(line).strip().encode("utf-8")).hexdigest()[:16]
 
@@ -4755,6 +4790,7 @@ class PortalServer:
         app.router.add_post("/portal/ping", self.ping)
         app.router.add_post("/portal/release", self.release)
         app.router.add_post("/portal/find", self.find)
+        app.router.add_get("/portal/files/archive", self.archive)
         app.router.add_get("/portal/files/{artifact_id}/content", self.content)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -4808,6 +4844,10 @@ class PortalServer:
     def _page_guard(self, request: Any, client: str) -> Any:
         path = str(request.path or "")
         counted = path in PORTAL_COUNTED_PATHS or path.startswith("/portal/files/")
+        if counted and path.endswith("/content") and str(request.query.get("inline") or "") in {"1", "true"}:
+            # Inline image previews (单张预览 / 展开全部图片) are limited per session in content(),
+            # not by the per-minute page limit, so expanding a result's images never trips a ban.
+            counted = False
         if not counted and path != "/portal/ping":
             return None
         fingerprint, tab = self._fingerprint(request)
@@ -4930,8 +4970,8 @@ class PortalServer:
         if error is not None:
             return error
         artifact_id = str(request.match_info.get("artifact_id") or "")
-        if not self.plugin.portal.allow(f"dl:{session['user'].get('user_id')}", PORTAL_DOWNLOADS_PER_10_MIN, 600):
-            return self._json(request, {"ok": False, "error": "下载太频繁，请稍后再试", "status": 429})
+        inline = str(request.query.get("inline") or "") in {"1", "true"}
+        user_key = str(session["user"].get("user_id") or "")
         if artifact_id not in session["files"]:
             return self._json(request, {"ok": False, "error": "只能查看查询结果中的文件", "status": 403})
         record = self.plugin.store.get(artifact_id)
@@ -4939,7 +4979,13 @@ class PortalServer:
         if not record or not path or not path.exists():
             return self._json(request, {"ok": False, "error": "文件不存在", "status": 404})
         name = str(record.get("name") or path.name)
-        inline = str(request.query.get("inline") or "") in {"1", "true"}
+        if inline and not _portal_is_image(record):
+            inline = False
+        if inline:
+            if not self.plugin.portal.allow(f"pv:{user_key}", PORTAL_PREVIEWS_PER_10_MIN, 600):
+                return self._json(request, {"ok": False, "error": "预览太频繁，请稍后再试", "status": 429})
+        elif not self.plugin.portal.allow(f"dl:{user_key}", PORTAL_DOWNLOADS_PER_10_MIN, 600):
+            return self._json(request, {"ok": False, "error": "下载太频繁，请稍后再试", "status": 429})
         disposition = "inline" if inline else "attachment"
         headers = {
             **self._cors(request),
@@ -4951,6 +4997,64 @@ class PortalServer:
         if not inline:
             self.plugin._portal_audit("download", session["user"], file=name, file_id=artifact_id, client=self._client(request))
         return web.FileResponse(path, headers=headers)
+
+    async def archive(self, request: Any) -> Any:
+        """一键下载：把本次登录查询结果中的文件打成一个 zip，整包只算一次请求、一次下载。"""
+
+        from aiohttp import web
+
+        session, error = self._session_or_error(request)
+        if error is not None:
+            return error
+        wanted = [item for item in str(request.query.get("ids") or "").split(",") if item.strip()]
+        ids = [item for item in dict.fromkeys(item.strip() for item in wanted) if item in session["files"]] if wanted else sorted(session["files"])
+        if not ids:
+            return self._json(request, {"ok": False, "error": "没有可下载的查询结果文件", "status": 404})
+        if len(ids) > PORTAL_ARCHIVE_MAX_FILES:
+            return self._json(request, {"ok": False, "error": f"一次最多打包 {PORTAL_ARCHIVE_MAX_FILES} 个文件，请缩小查询范围", "status": 413})
+        if not self.plugin.portal.allow(f"dl:{session['user'].get('user_id')}", PORTAL_DOWNLOADS_PER_10_MIN, 600):
+            return self._json(request, {"ok": False, "error": "下载太频繁，请稍后再试", "status": 429})
+        entries: list[tuple[Path, str, str]] = []
+        total = 0
+        for artifact_id in ids:
+            record = self.plugin.store.get(artifact_id)
+            path = self.plugin.store.path_for(record) if record else None
+            if not record or not path or not path.exists():
+                continue
+            total += path.stat().st_size
+            entries.append((path, str(record.get("name") or path.name), artifact_id))
+        if not entries:
+            return self._json(request, {"ok": False, "error": "文件不存在", "status": 404})
+        if total > PORTAL_ARCHIVE_MAX_BYTES:
+            return self._json(request, {"ok": False, "error": f"文件总大小超过 {PORTAL_ARCHIVE_MAX_BYTES // 1024 // 1024} MB，请缩小查询范围后分开下载", "status": 413})
+        label = re.sub(r'[\\/:*?"<>|\s]+', "_", str(request.query.get("name") or "").strip())[:40].strip("_.")
+        zip_name = f"名单查询{('-' + label) if label else ''}-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        tmp = await asyncio.to_thread(_portal_build_archive, entries)
+        try:
+            headers = {
+                **self._cors(request),
+                "Content-Type": "application/zip",
+                "Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(zip_name)}",
+                "Content-Length": str(tmp.stat().st_size),
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+            response = web.StreamResponse(status=200, headers=headers)
+            await response.prepare(request)
+            with tmp.open("rb") as handle:
+                while True:
+                    chunk = await asyncio.to_thread(handle.read, 256 * 1024)
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+            await response.write_eof()
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        self.plugin._portal_audit("download", session["user"], file=f"{zip_name}（{len(entries)} 个文件）", file_id=",".join(item[2] for item in entries)[:400], client=self._client(request))
+        return response
 
 
 @register(
