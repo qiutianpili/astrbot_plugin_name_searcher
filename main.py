@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.13.0"
+PLUGIN_VERSION = "1.13.1"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -5723,7 +5723,11 @@ class NameSearcherPlugin(Star):
         raw = ""
         if _astr_web_request is not None:
             try:
-                raw = str(_astr_web_request.args.get("ids") or "")
+                # AstrBot 4.29+ 的 PluginRequest 用 .query（Starlette 风格），旧写法 .args 不存在会导致 ids 为空 → 400
+                source = getattr(_astr_web_request, "query", None)
+                if source is None:
+                    source = getattr(_astr_web_request, "args", None)
+                raw = str((source.get("ids") if source is not None else "") or "")
             except Exception:
                 raw = ""
         path, zip_name, error, status = await asyncio.to_thread(self.build_panel_archive, raw)
