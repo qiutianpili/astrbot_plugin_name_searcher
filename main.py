@@ -136,7 +136,7 @@ register = _register
 
 
 PLUGIN_ID = "astrbot_plugin_name_searcher"
-PLUGIN_VERSION = "1.12.0"
+PLUGIN_VERSION = "1.13.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 LEGACY_STORAGE_DIRS = {"data/name_searcher/files", "data/name_searcher/files/"}
 
@@ -4163,6 +4163,19 @@ class _FallbackPanelApp:
             if method == "POST" and table_match:
                 await self._json(send, await self.plugin.image_to_table(urllib.parse.unquote(table_match.group(1))))
                 return
+            if method == "GET" and path == "/files/archive":
+                query = urllib.parse.parse_qs(scope.get("query_string", b"").decode("utf-8", "ignore"))
+                built, zip_name, error, status = await asyncio.to_thread(self.plugin.build_panel_archive, (query.get("ids") or [""])[0])
+                if built is None:
+                    await self._json(send, {"error": error}, status)
+                    return
+                await self._respond(
+                    send,
+                    built.read_bytes(),
+                    content_type="application/zip",
+                    headers=[(b"content-disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(zip_name)}".encode("ascii"))],
+                )
+                return
             file_match = re.fullmatch(r"/files/([^/]+)(?:/content)?", path)
             if method == "GET" and file_match:
                 record = self.plugin.store.get(urllib.parse.unquote(file_match.group(1)))
@@ -4296,6 +4309,12 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         progress = plugin.get_progress(request.path_params.get("progress_id", ""))
         return JSONResponse({"progress": progress}, status_code=200 if progress else 404)
 
+    async def get_archive(request: Any) -> Response:
+        built, zip_name, error, status = await asyncio.to_thread(plugin.build_panel_archive, request.query_params.get("ids", ""))
+        if built is None:
+            return JSONResponse({"error": error}, status_code=status)
+        return FileResponse(built, media_type="application/zip", filename=zip_name)
+
     async def get_file(request: Any) -> Response:
         record = plugin.store.get(request.path_params.get("artifact_id", ""))
         if not record:
@@ -4386,6 +4405,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/stop", stop_all, methods=["POST"]),
         Route("/find", find_objects, methods=["POST"]),
         Route("/files/upload", upload_files, methods=["POST"]),
+        Route("/files/archive", get_archive, methods=["GET"]),
         Route("/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/files/{artifact_id}/preview", preview_file, methods=["GET"]),
         Route("/files/{artifact_id}/content", get_file, methods=["GET"]),
@@ -4401,6 +4421,7 @@ def _build_unguarded_web_app(plugin: "NameSearcherPlugin") -> Any:
         Route("/api/stop", stop_all, methods=["POST"]),
         Route("/api/find", find_objects, methods=["POST"]),
         Route("/api/files/upload", upload_files, methods=["POST"]),
+        Route("/api/files/archive", get_archive, methods=["GET"]),
         Route("/api/files/{artifact_id}/table", table, methods=["POST"]),
         Route("/api/files/{artifact_id}/preview", preview_file, methods=["GET"]),
         Route("/api/files/{artifact_id}/content", get_file, methods=["GET"]),
@@ -4428,6 +4449,9 @@ PORTAL_DOWNLOADS_PER_10_MIN = 60  # per session
 PORTAL_PREVIEWS_PER_10_MIN = 400  # inline image previews per session (not counted by the per-minute page limit)
 PORTAL_ARCHIVE_MAX_FILES = 200
 PORTAL_ARCHIVE_MAX_BYTES = 300 * 1024 * 1024
+PANEL_ARCHIVE_MAX_FILES = 1000
+PANEL_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024
+PANEL_ARCHIVE_KEEP_SECONDS = 1800
 PORTAL_FIND_CONCURRENCY = 2
 PORTAL_BAN_BURST = 30  # requests from one IP within PORTAL_BAN_WINDOW seconds -> permanent ban
 PORTAL_BAN_WINDOW = 10
@@ -4659,10 +4683,10 @@ def _portal_is_image(record: Mapping[str, Any]) -> bool:
     return str(record.get("kind") or "") == "image" or str(record.get("mime") or "").startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"))
 
 
-def _portal_build_archive(entries: list[tuple[Path, str, str]]) -> Path:
+def _portal_build_archive(entries: list[tuple[Path, str, str]], folder: Optional[Path] = None) -> Path:
     """Write the selected result files into a temporary zip (UTF-8 names, duplicates renamed)."""
 
-    handle = tempfile.NamedTemporaryFile(prefix="ns-portal-", suffix=".zip", delete=False)
+    handle = tempfile.NamedTemporaryFile(prefix="ns-portal-", suffix=".zip", delete=False, dir=str(folder) if folder else None)
     handle.close()
     target = Path(handle.name)
     used: set[str] = set()
@@ -5333,6 +5357,7 @@ class NameSearcherPlugin(Star):
             (f"/{PLUGIN_ID}/files/clear", self._page_clear_files, ["POST"], "Clear captured files"),
             (f"/{PLUGIN_ID}/files/clear-failed", self._page_clear_failed_files, ["POST"], "Clear failed downloads"),
             (f"/{PLUGIN_ID}/files/upload", self._page_upload_files, ["POST"], "Upload local files"),
+            (f"/{PLUGIN_ID}/files/archive", self._page_file_archive, ["GET"], "Download selected files as one zip"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/preview", self._page_file_preview, ["GET"], "Preview image"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/content", self._page_file_content, ["GET"], "Download captured file"),
             (f"/{PLUGIN_ID}/files/<artifact_id>/blob", self._page_file_blob, ["GET"], "Captured file for the online viewer"),
@@ -5656,6 +5681,57 @@ class NameSearcherPlugin(Star):
     async def _page_file_blob(self, artifact_id: str) -> Any:
         payload, status = await asyncio.to_thread(_blob_payload, self.store, artifact_id)
         return _page_json_response(payload, status)
+
+    def build_panel_archive(self, raw_ids: Any) -> tuple[Optional[Path], str, str, int]:
+        """打包面板选中的文件（一键下载 / 下载所选）。返回 (zip 路径, 下载文件名, 错误, 状态码)。"""
+
+        if isinstance(raw_ids, str):
+            raw_ids = raw_ids.split(",")
+        ids = [str(item).strip() for item in (raw_ids or []) if str(item).strip()]
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return None, "", "请先选择要下载的文件", 400
+        if len(ids) > PANEL_ARCHIVE_MAX_FILES:
+            return None, "", f"一次最多打包 {PANEL_ARCHIVE_MAX_FILES} 个文件", 413
+        entries: list[tuple[Path, str, str]] = []
+        total = 0
+        for artifact_id in ids:
+            record = self.store.get(artifact_id)
+            path = self.store.path_for(record) if record else None
+            if not record or not path or not path.exists():
+                continue
+            total += path.stat().st_size
+            entries.append((path, str(record.get("name") or path.name), artifact_id))
+        if not entries:
+            return None, "", "所选文件都没有可下载的内容", 404
+        if total > PANEL_ARCHIVE_MAX_BYTES:
+            return None, "", f"所选文件总大小超过 {PANEL_ARCHIVE_MAX_BYTES // 1024 // 1024} MB，请分批下载", 413
+        folder = self.store.root.parent / "archives" if hasattr(self.store, "root") else Path(tempfile.gettempdir()) / "ns-panel-archives"
+        folder.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        for old in folder.glob("ns-portal-*.zip"):
+            try:
+                if now - old.stat().st_mtime > PANEL_ARCHIVE_KEEP_SECONDS:
+                    old.unlink()
+            except OSError:
+                pass
+        built = _portal_build_archive(entries, folder)
+        zip_name = f"名单文件-{len(entries)}个-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        return built, zip_name, "", 200
+
+    async def _page_file_archive(self) -> Any:
+        raw = ""
+        if _astr_web_request is not None:
+            try:
+                raw = str(_astr_web_request.args.get("ids") or "")
+            except Exception:
+                raw = ""
+        path, zip_name, error, status = await asyncio.to_thread(self.build_panel_archive, raw)
+        if path is None:
+            return _page_error(error, status)
+        if not callable(_astr_file_response):
+            return _page_error("当前 AstrBot 版本不支持 Page 文件下载", 501)
+        return _astr_file_response(str(path), filename=zip_name, content_type="application/zip")
 
     async def _page_file_content(self, artifact_id: str) -> Any:
         record = self.store.get(artifact_id)

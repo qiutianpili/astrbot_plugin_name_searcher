@@ -354,6 +354,18 @@ class NameSearcherPluginTests(unittest.TestCase):
         self.assertEqual(plugin.portal.revoke_user("42"), 1)
         self.assertIsNone(plugin.portal.session(session["token"]))
 
+    def test_panel_archive_zips_selected_files(self):
+        plugin = make_plugin(self.temp_path, vision_enabled=False, capture_progress_notify=False)
+        one = plugin.store.add_bytes("名单.txt", "张三".encode("utf-8"), kind="document", mime="text/plain", source={})
+        two = plugin.store.add_bytes("名单.txt", "李四".encode("utf-8"), kind="document", mime="text/plain", source={})
+        built, name, error, status = plugin.build_panel_archive(f"{one['id']},{two['id']},missing")
+        self.assertEqual((status, error), (200, ""))
+        self.assertTrue(name.endswith(".zip"))
+        with zipfile.ZipFile(built) as bundle:
+            self.assertEqual(sorted(bundle.namelist()), ["名单(2).txt", "名单.txt"])
+        self.assertEqual(plugin.build_panel_archive("")[3], 400)
+        self.assertEqual(plugin.build_panel_archive("missing")[3], 404)
+
     def test_portal_rate_default_is_30(self):
         self.assertEqual(main.DEFAULT_CONFIG["portal_rate_per_minute"], 30)
 

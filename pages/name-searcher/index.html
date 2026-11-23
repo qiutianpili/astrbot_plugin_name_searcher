@@ -259,7 +259,7 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.12.0</span></div>
+        <div id="heroEyebrow" class="eyebrow">姓名文件查找器 · <span id="pluginVersion">v1.13.0</span></div>
         <h1>文件资料库</h1>
         <p class="subtitle">集中查看已捕获的聊天附件，并管理下载内容。</p>
       </div>
@@ -284,6 +284,7 @@
         <div class="search"><span class="search-mark" aria-hidden="true">⌕</span><input id="findInput" type="search" maxlength="64" placeholder="如 张三、张*、王小?" aria-label="查找对象"></div>
         <button id="findButton" class="button primary" type="submit">查找</button>
         <button id="findFilterButton" class="button" type="button" disabled title="文件列表只显示查找结果中的文件">只看这些文件</button>
+        <button id="findDownloadButton" class="button" type="button" disabled title="把查找结果里的全部文件打包成一个 zip 下载">一键下载</button>
         <button id="findClearButton" class="button" type="button">清除</button>
       </form>
       <div id="findSummary" class="find-summary" hidden></div>
@@ -300,6 +301,8 @@
         <input id="bundleInput" class="visually-hidden" type="file" accept=".zip,.sha256,.txt,application/zip" multiple>
         <button id="bundleButton" class="button" type="button" title="导入本地识别工具生成的识别包，服务器不再做 OCR">导入识别包</button>
         <button id="selectAllButton" class="button" type="button">全选</button>
+        <button id="downloadSelectedButton" class="button" type="button" disabled title="把勾选的文件打包成一个 zip 下载">下载所选 <span id="downloadCount" class="count">0</span></button>
+        <button id="downloadAllButton" class="button" type="button" title="把当前列表（含筛选结果）里的全部文件打包成一个 zip 下载">一键下载</button>
         <button id="deleteSelectedButton" class="button danger" type="button" disabled>删除所选 <span id="selectedCount" class="count">0</span></button>
         <button id="clearAllButton" class="button danger" type="button">一键清理</button>
         <button id="clearFailedButton" class="button danger" type="button">清理下载失败</button>
@@ -801,6 +804,10 @@
         els.total.textContent = state.files.length; els.images.textContent = images; els.docs.textContent = docs; els.selected.textContent = selected; els.selectedCount.textContent = selected;
         const deleteButton = document.getElementById('deleteSelectedButton');
         deleteButton.disabled = selected === 0 || deleteButton.dataset.busy === '1';
+        const downloadSelected = document.getElementById('downloadSelectedButton');
+        if (downloadSelected) { downloadSelected.disabled = selected === 0 || downloadSelected.dataset.busy === '1'; document.getElementById('downloadCount').textContent = selected; }
+        const downloadAll = document.getElementById('downloadAllButton');
+        if (downloadAll) downloadAll.disabled = state.filtered.length === 0 || downloadAll.dataset.busy === '1';
         const allVisibleSelected = state.filtered.length > 0 && state.filtered.every(file => state.selected.has(fileId(file)));
         document.getElementById('selectAllButton').textContent = allVisibleSelected ? '取消全选' : '全选';
       }
@@ -1138,6 +1145,7 @@
         const names = Array.isArray(result && result.names) ? result.names : [];
         state.findResultIds = [...new Set(names.flatMap(group => (group.files || []).map(item => String(item.id))))];
         findEls.filter.disabled = state.findResultIds.length === 0;
+        document.getElementById('findDownloadButton').disabled = state.findResultIds.length === 0;
         findEls.summary.hidden = false;
         if (!result || result.ok === false) { findEls.summary.textContent = text(result && result.message, '查找失败'); findEls.results.innerHTML = ''; return; }
         if (!names.length) { findEls.summary.textContent = `未找到“${text(result.query)}”。${result.wildcard ? '* 表示一个或多个字，? 表示一个字。' : '可以试试通配符，如 张*。'}`; findEls.results.innerHTML = ''; return; }
@@ -1160,7 +1168,7 @@
       };
       findEls.form.addEventListener('submit', event => { event.preventDefault(); runFind(); });
       findEls.filter.addEventListener('click', () => setFindFilter(state.findIds ? null : state.findResultIds));
-      findEls.clear.addEventListener('click', () => { findEls.input.value = ''; findEls.results.innerHTML = ''; findEls.summary.hidden = true; state.findResultIds = []; findEls.filter.disabled = true; setFindFilter(null); });
+      findEls.clear.addEventListener('click', () => { findEls.input.value = ''; findEls.results.innerHTML = ''; findEls.summary.hidden = true; state.findResultIds = []; findEls.filter.disabled = true; document.getElementById('findDownloadButton').disabled = true; setFindFilter(null); });
       findEls.results.addEventListener('click', event => { const chip = event.target.closest('[data-find-file]'); if (!chip) return; const file = findFile(chip.dataset.findFile); if (file) showPreview(file); else toast('文件列表还没有这个文件，请先刷新'); });
       els.list.addEventListener('click', event => { if (event.target.closest('[data-collapse]')) { state.expanded = !state.expanded; render(); return; } const preview = event.target.closest('[data-preview]'); const remove = event.target.closest('[data-delete]'); if (preview) showPreview(findFile(preview.dataset.preview)); if (remove) removeFiles([remove.dataset.delete]); });
       els.list.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const card = event.target.closest('.file-card'); if (card && event.target === card) { event.preventDefault(); showPreview(findFile(card.dataset.id)); } });
@@ -1168,6 +1176,30 @@
       document.getElementById('onlineViewButton').addEventListener('click', openOnlineViewer);
       document.getElementById('closeViewerButton').addEventListener('click', closeOnlineViewer);
       document.getElementById('viewerDialog').addEventListener('close', () => { document.getElementById('viewerBody').innerHTML = ''; });
+      // 一键下载 / 下载所选：多个文件由服务器打包成一个 zip，单个文件直接下载
+      async function downloadMany(ids, button) {
+        const list = [...new Set(ids.map(String))].filter(id => { const file = findFile(id); return !file || file.download_status !== 'unavailable'; });
+        if (!list.length) { toast('没有可下载的文件'); return; }
+        const label = button ? button.innerHTML : '';
+        if (button) { button.dataset.busy = '1'; button.disabled = true; button.textContent = list.length > 1 ? '正在打包…' : '正在下载…'; }
+        showError('');
+        try {
+          if (list.length === 1) {
+            const file = findFile(list[0]); const name = file ? fileName(file) : 'download';
+            if (useBridge) await bridge.download(`files/${encodeURIComponent(list[0])}/content`, {}, name);
+            else { const url = file ? fileUrl(file) : ''; if (!url) throw new Error('文件不可下载'); const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
+          } else {
+            const zipName = `名单文件-${list.length}个.zip`;
+            toast(`正在打包 ${list.length} 个文件，请稍候`);
+            if (useBridge) await bridge.download('files/archive', {ids: list.join(',')}, zipName);
+            else { const a = document.createElement('a'); a.href = withToken(endpoint(activeApi, `/files/archive?ids=${encodeURIComponent(list.join(','))}`)); a.download = zipName; document.body.appendChild(a); a.click(); a.remove(); }
+          }
+        } catch (error) { showError(`下载失败：${error.message}`); }
+        finally { if (button) { delete button.dataset.busy; button.innerHTML = label; } updateStats(); if (button && button.id === 'findDownloadButton') button.disabled = state.findResultIds.length === 0; }
+      }
+      document.getElementById('downloadSelectedButton').addEventListener('click', event => downloadMany([...state.selected].filter(id => state.files.some(file => fileId(file) === id)), event.currentTarget));
+      document.getElementById('downloadAllButton').addEventListener('click', event => downloadMany(state.filtered.map(fileId), event.currentTarget));
+      document.getElementById('findDownloadButton').addEventListener('click', event => downloadMany(state.findResultIds, event.currentTarget));
       els.download.addEventListener('click', async event => {
         if (!useBridge) return;
         event.preventDefault();
